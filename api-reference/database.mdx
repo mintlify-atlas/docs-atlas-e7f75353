@@ -1,0 +1,492 @@
+---
+title: "Database Client"
+description: "LocalDatabase client API for managing repositories, chunks, embeddings, and vector search"
+---
+
+## Overview
+
+The `LocalDatabase` class provides a SQL.js-based client for managing the complete semantic search index. It handles repository metadata, text chunking, embedding storage, and vector similarity search.
+
+## Initialization
+
+### getDb()
+
+Get or create the singleton database instance.
+
+```typescript
+import { getDb } from "./db/client";
+
+const db = await getDb();
+```
+
+<ResponseField name="Returns" type="Promise<LocalDatabase>">
+  Singleton LocalDatabase instance
+</ResponseField>
+
+### Constructor
+
+Create a new LocalDatabase instance (typically not called directly).
+
+```typescript
+import { LocalDatabase } from "./db/client";
+import initSqlJs from "sql.js";
+
+const SQL = await initSqlJs({ locateFile: () => wasmUrl });
+const rawDb = new SQL.Database();
+const db = new LocalDatabase({
+  sql: SQL,
+  db: rawDb,
+  storageMode: "opfs",
+  embeddingCheckpointPolicy: {
+    everyEmbeddings: 256,
+    everyMs: 3000
+  }
+});
+```
+
+<ParamField path="args.sql" type="SqlJsStatic" required>
+  SQL.js instance
+</ParamField>
+
+<ParamField path="args.db" type="Database" required>
+  SQL.js Database instance
+</ParamField>
+
+<ParamField path="args.storageMode" type="StorageMode" required>
+  Storage backend: `"opfs"` | `"local-storage"` | `"memory"`
+</ParamField>
+
+<ParamField path="args.embeddingCheckpointPolicy" type="EmbeddingCheckpointPolicy">
+  Optional checkpoint configuration
+</ParamField>
+
+## Repository Management
+
+### upsertRepos()
+
+Insert or update repository records.
+
+```typescript
+await db.upsertRepos([{
+  id: 123456,
+  fullName: "owner/repo",
+  name: "repo",
+  description: "A semantic search library",
+  topics: ["vector-search", "embeddings"],
+  language: "TypeScript",
+  htmlUrl: "https://github.com/owner/repo",
+  stars: 1500,
+  forks: 42,
+  updatedAt: "2026-03-01T00:00:00Z",
+  readmeUrl: "https://github.com/owner/repo/blob/main/README.md",
+  readmeText: "# Project\n\nDescription...",
+  readmeEtag: "abc123",
+  readmeLastModified: "2026-02-28T12:00:00Z",
+  checksum: "sha256-...",
+  lastSyncedAt: Date.now()
+}]);
+```
+
+<ParamField path="repos" type="RepoRecord[]" required>
+  Array of repository records to upsert
+</ParamField>
+
+<ResponseField name="Returns" type="Promise<void>">
+  Resolves when all repos are persisted
+</ResponseField>
+
+### listRepos()
+
+Retrieve all stored repositories.
+
+```typescript
+const repos = db.listRepos();
+console.log(`Found ${repos.length} repositories`);
+```
+
+<ResponseField name="Returns" type="RepoRecord[]">
+  Array of all repository records, ordered by ID ascending
+</ResponseField>
+
+### listRepoSyncState()
+
+Get lightweight sync state for all repositories.
+
+```typescript
+const states = db.listRepoSyncState();
+for (const state of states) {
+  console.log(`${state.fullName}: ${state.checksum}`);
+}
+```
+
+<ResponseField name="Returns" type="RepoSyncState[]">
+  Array of sync state records (id, fullName, checksum, etags, updatedAt)
+</ResponseField>
+
+### getRepoCount()
+
+Count total repositories in the database.
+
+```typescript
+const count = db.getRepoCount();
+console.log(`Total repos: ${count}`);
+```
+
+<ResponseField name="Returns" type="number">
+  Total number of repositories
+</ResponseField>
+
+### deleteReposByIds()
+
+Delete repositories and cascade to chunks/embeddings.
+
+```typescript
+await db.deleteReposByIds([123, 456, 789]);
+```
+
+<ParamField path="repoIds" type="number[]" required>
+  Array of repository IDs to delete
+</ParamField>
+
+<ResponseField name="Returns" type="Promise<void>">
+  Resolves when deletion is complete
+</ResponseField>
+
+## Chunk Management
+
+### upsertChunks()
+
+Insert or update text chunks.
+
+```typescript
+await db.upsertChunks([{
+  id: "123:0",
+  repoId: 123,
+  chunkId: "123:0",
+  text: "Repository: owner/repo\nDescription: semantic search...",
+  source: "metadata+readme",
+  createdAt: Date.now()
+}]);
+```
+
+<ParamField path="chunks" type="ChunkRecord[]" required>
+  Array of chunk records to upsert
+</ParamField>
+
+<ResponseField name="Returns" type="Promise<void>">
+  Resolves when chunks are persisted and vector cache is invalidated
+</ResponseField>
+
+### getChunkCount()
+
+Count total chunks in the database.
+
+```typescript
+const count = db.getChunkCount();
+console.log(`Total chunks: ${count}`);
+```
+
+<ResponseField name="Returns" type="number">
+  Total number of chunks
+</ResponseField>
+
+### deleteChunksByRepoIds()
+
+Delete all chunks for specified repositories.
+
+```typescript
+await db.deleteChunksByRepoIds([123, 456]);
+```
+
+<ParamField path="repoIds" type="number[]" required>
+  Array of repository IDs
+</ParamField>
+
+<ResponseField name="Returns" type="Promise<void>">
+  Resolves when deletion is complete and caches are cleared
+</ResponseField>
+
+## Embedding Management
+
+### upsertEmbeddings()
+
+Insert or update embedding vectors.
+
+```typescript
+import { float32ToBlob } from "./embeddings/vector";
+
+const vector = new Float32Array([0.1, 0.2, 0.3, ...]);
+await db.upsertEmbeddings([{
+  id: "emb-123:0",
+  chunkId: "123:0",
+  model: "Xenova/all-MiniLM-L6-v2",
+  dimension: 384,
+  vectorBlob: float32ToBlob(vector),
+  createdAt: Date.now()
+}]);
+```
+
+<ParamField path="embeddings" type="EmbeddingRecord[]" required>
+  Array of embedding records to upsert
+</ParamField>
+
+<ResponseField name="Returns" type="Promise<void>">
+  Resolves when embeddings are persisted. May trigger automatic checkpoint.
+</ResponseField>
+
+### getEmbeddingCount()
+
+Count total embeddings in the database.
+
+```typescript
+const count = db.getEmbeddingCount();
+const pending = db.getPendingEmbeddingChunkCount();
+console.log(`${count} embedded, ${pending} pending`);
+```
+
+<ResponseField name="Returns" type="number">
+  Total number of embeddings
+</ResponseField>
+
+### getPendingEmbeddingChunkCount()
+
+Count chunks without embeddings.
+
+```typescript
+const pending = db.getPendingEmbeddingChunkCount();
+```
+
+<ResponseField name="Returns" type="number">
+  Number of chunks that need embedding
+</ResponseField>
+
+### getChunksToEmbed()
+
+Get next batch of chunks to embed.
+
+```typescript
+const chunks = db.getChunksToEmbed(50);
+for (const chunk of chunks) {
+  const vector = await embedder.embed(chunk.text);
+  // ... store embedding
+}
+```
+
+<ParamField path="limit" type="number" required>
+  Maximum number of chunks to return
+</ParamField>
+
+<ResponseField name="Returns" type="ChunkRecord[]">
+  Array of chunks without embeddings, ordered by created_at ascending
+</ResponseField>
+
+### listPendingChunksForEmbedding()
+
+Get pending chunks with optional filtering.
+
+```typescript
+const chunks = db.listPendingChunksForEmbedding({
+  limit: 100,
+  repoIds: [123, 456]
+});
+```
+
+<ParamField path="args.limit" type="number">
+  Maximum number of chunks to return
+</ParamField>
+
+<ParamField path="args.repoIds" type="number[]">
+  Filter to specific repository IDs
+</ParamField>
+
+<ResponseField name="Returns" type="ChunkRecord[]">
+  Filtered chunks without embeddings
+</ResponseField>
+
+### clearEmbeddings()
+
+Delete all embeddings and reset checkpoint state.
+
+```typescript
+await db.clearEmbeddings();
+```
+
+<ResponseField name="Returns" type="Promise<void>">
+  Resolves when all embeddings are deleted and caches cleared
+</ResponseField>
+
+## Checkpoint Management
+
+### getEmbeddingCheckpointStatus()
+
+Get current checkpoint state.
+
+```typescript
+const status = db.getEmbeddingCheckpointStatus();
+console.log(`${status.pendingEmbeddings} embeddings pending checkpoint`);
+```
+
+<ResponseField name="Returns" type="object">
+  Checkpoint status object
+</ResponseField>
+
+<ResponseField name="lastCheckpointAt" type="number | null">
+  Timestamp of last checkpoint, or null if never checkpointed
+</ResponseField>
+
+<ResponseField name="pendingEmbeddings" type="number">
+  Number of embeddings written since last checkpoint
+</ResponseField>
+
+<ResponseField name="everyEmbeddings" type="number">
+  Checkpoint threshold (number of embeddings)
+</ResponseField>
+
+<ResponseField name="everyMs" type="number">
+  Checkpoint threshold (milliseconds)
+</ResponseField>
+
+### flushPendingEmbeddingCheckpoint()
+
+Force an immediate checkpoint.
+
+```typescript
+const flushed = await db.flushPendingEmbeddingCheckpoint();
+if (flushed) {
+  console.log("Database checkpointed");
+}
+```
+
+<ResponseField name="Returns" type="Promise<boolean>">
+  `true` if checkpoint was performed, `false` if no pending embeddings
+</ResponseField>
+
+## Metadata
+
+### upsertIndexMeta()
+
+Store key-value metadata.
+
+```typescript
+await db.upsertIndexMeta({
+  key: "embedding_model",
+  value: "Xenova/all-MiniLM-L6-v2",
+  updatedAt: Date.now()
+});
+```
+
+<ParamField path="record.key" type="string" required>
+  Metadata key
+</ParamField>
+
+<ParamField path="record.value" type="string" required>
+  Metadata value
+</ParamField>
+
+<ParamField path="record.updatedAt" type="number" required>
+  Timestamp (milliseconds since epoch)
+</ParamField>
+
+<ResponseField name="Returns" type="Promise<void>">
+  Resolves when metadata is persisted
+</ResponseField>
+
+### getIndexMetaValue()
+
+Retrieve metadata value by key.
+
+```typescript
+const model = db.getIndexMetaValue("embedding_model");
+if (model) {
+  console.log(`Using model: ${model}`);
+}
+```
+
+<ParamField path="key" type="string" required>
+  Metadata key to retrieve
+</ParamField>
+
+<ResponseField name="Returns" type="string | null">
+  Metadata value, or null if key not found
+</ResponseField>
+
+## Storage
+
+### storageMode (property)
+
+Get current storage backend.
+
+```typescript
+const mode = db.storageMode;
+console.log(`Storage: ${mode}`); // "opfs", "local-storage", or "memory"
+```
+
+<ResponseField name="Returns" type="StorageMode">
+  Current storage mode: `"opfs"` | `"local-storage"` | `"memory"`
+</ResponseField>
+
+## Types
+
+### RepoRecord
+
+```typescript
+type RepoRecord = {
+  id: number;
+  fullName: string;
+  name: string;
+  description: string | null;
+  topics: string[];
+  language: string | null;
+  htmlUrl: string;
+  stars: number;
+  forks: number;
+  updatedAt: string;
+  readmeUrl: string | null;
+  readmeText: string | null;
+  readmeEtag?: string | null;
+  readmeLastModified?: string | null;
+  checksum: string | null;
+  lastSyncedAt: number;
+};
+```
+
+### ChunkRecord
+
+```typescript
+type ChunkRecord = {
+  id: string;
+  repoId: number;
+  chunkId: string;
+  text: string;
+  source: string;
+  createdAt: number;
+};
+```
+
+### EmbeddingRecord
+
+```typescript
+type EmbeddingRecord = {
+  id: string;
+  chunkId: string;
+  model: string;
+  dimension: number;
+  vectorBlob: Uint8Array;
+  createdAt: number;
+};
+```
+
+### StorageMode
+
+```typescript
+type StorageMode = "opfs" | "local-storage" | "memory";
+```
+
+### EmbeddingCheckpointPolicy
+
+```typescript
+type EmbeddingCheckpointPolicy = {
+  everyEmbeddings: number;  // Checkpoint after N embeddings
+  everyMs: number;           // Checkpoint after N milliseconds
+};
+```

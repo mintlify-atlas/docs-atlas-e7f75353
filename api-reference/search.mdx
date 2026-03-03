@@ -1,0 +1,348 @@
+---
+title: "Search and Retrieval"
+description: "Vector similarity search API for semantic repository discovery"
+---
+
+## Overview
+
+The `findSimilarChunks` method performs cosine similarity search over stored embeddings to find semantically related repository chunks.
+
+## Vector Search
+
+### findSimilarChunks()
+
+Find most similar chunks to a query vector.
+
+```typescript
+import { getDb } from "./db/client";
+import { Embedder } from "./embeddings/Embedder";
+
+const db = await getDb();
+const embedder = new Embedder();
+
+// Embed the user's query
+const query = "GraphQL security testing";
+const queryVector = await embedder.embed(query);
+
+// Find similar chunks
+const results = await db.findSimilarChunks(queryVector, 10);
+
+for (const result of results) {
+  console.log(`${result.repoFullName} (score: ${result.score.toFixed(3)})`);
+  console.log(result.text.slice(0, 100));
+}
+```
+
+<ParamField path="queryVector" type="Float32Array" required>
+  Query embedding vector (typically 384 dimensions)
+</ParamField>
+
+<ParamField path="limit" type="number" default={10}>
+  Maximum number of results to return
+</ParamField>
+
+<ResponseField name="Returns" type="Promise<SearchResult[]>">
+  Array of search results ordered by similarity score (descending)
+</ResponseField>
+
+<Note>
+  Returns empty array if no embeddings exist in the database.
+</Note>
+
+## Search Results
+
+### SearchResult
+
+Each result contains the chunk text, similarity score, and full repository metadata.
+
+```typescript
+type SearchResult = {
+  // Chunk info
+  chunkId: string;
+  score: number;
+  text: string;
+  
+  // Repository info
+  repoId: number;
+  repoName: string;
+  repoFullName: string;
+  repoDescription: string | null;
+  repoUrl: string;
+  language: string | null;
+  topics: string[];
+  updatedAt: string;
+};
+```
+
+<ResponseField name="chunkId" type="string">
+  Unique chunk identifier (format: `"repoId:index"`)
+</ResponseField>
+
+<ResponseField name="score" type="number">
+  Cosine similarity score (0.0 to 1.0). Higher = more similar.
+</ResponseField>
+
+<ResponseField name="text" type="string">
+  Full chunk text including metadata header and README excerpt
+</ResponseField>
+
+<ResponseField name="repoId" type="number">
+  GitHub repository ID
+</ResponseField>
+
+<ResponseField name="repoName" type="string">
+  Repository name (without owner)
+</ResponseField>
+
+<ResponseField name="repoFullName" type="string">
+  Full repository name ("owner/repo")
+</ResponseField>
+
+<ResponseField name="repoDescription" type="string | null">
+  Repository description from GitHub
+</ResponseField>
+
+<ResponseField name="repoUrl" type="string">
+  GitHub HTML URL for the repository
+</ResponseField>
+
+<ResponseField name="language" type="string | null">
+  Primary programming language
+</ResponseField>
+
+<ResponseField name="topics" type="string[]">
+  GitHub topics/tags for the repository
+</ResponseField>
+
+<ResponseField name="updatedAt" type="string">
+  Repository last updated timestamp (ISO 8601)
+</ResponseField>
+
+## Similarity Scoring
+
+The search uses cosine similarity with L2-normalized vectors:
+
+```typescript
+function cosineSimilarity(a: Float32Array, b: Float32Array): number {
+  if (a.length !== b.length) return 0;
+  
+  let dot = 0;
+  let normA = 0;
+  let normB = 0;
+  
+  for (let i = 0; i < a.length; i++) {
+    dot += a[i] * b[i];
+    normA += a[i] * a[i];
+    normB += b[i] * b[i];
+  }
+  
+  return dot / (Math.sqrt(normA) * Math.sqrt(normB));
+}
+```
+
+<ParamField path="a" type="Float32Array" required>
+  First vector (query or document)
+</ParamField>
+
+<ParamField path="b" type="Float32Array" required>
+  Second vector (query or document)
+</ParamField>
+
+<ResponseField name="Returns" type="number">
+  Similarity score from 0.0 (orthogonal) to 1.0 (identical)
+</ResponseField>
+
+## Performance Optimization
+
+The database maintains an in-memory vector index cache for fast repeated searches:
+
+```typescript
+// First search: loads and caches all vectors
+const results1 = await db.findSimilarChunks(queryVector1, 10);
+// ~100ms for 10k embeddings
+
+// Subsequent searches: uses cached vectors
+const results2 = await db.findSimilarChunks(queryVector2, 10);
+// ~20ms for 10k embeddings
+```
+
+Cache invalidation:
+- Automatically invalidated when chunks or embeddings are added/deleted
+- Automatically rebuilds on next search
+- Cache count tracked to detect stale data
+
+## Complete Search Example
+
+```typescript
+import { getDb } from "./db/client";
+import { Embedder } from "./embeddings/Embedder";
+
+async function semanticSearch(query: string, limit = 5) {
+  const db = await getDb();
+  const embedder = new Embedder();
+  
+  try {
+    // Generate query embedding
+    const queryVector = await embedder.embed(query);
+    
+    // Search for similar chunks
+    const results = await db.findSimilarChunks(queryVector, limit);
+    
+    // Format results
+    return results.map(result => ({
+      repository: result.repoFullName,
+      url: result.repoUrl,
+      description: result.repoDescription,
+      language: result.language,
+      topics: result.topics,
+      similarity: result.score,
+      excerpt: result.text.slice(0, 200) + "..."
+    }));
+  } finally {
+    embedder.terminate();
+  }
+}
+
+// Usage
+const results = await semanticSearch("machine learning models", 5);
+console.table(results);
+```
+
+## Filtering Results
+
+Implement custom filters after retrieval:
+
+```typescript
+const results = await db.findSimilarChunks(queryVector, 50);
+
+// Filter by language
+const tsRepos = results.filter(r => r.language === "TypeScript");
+
+// Filter by topic
+const mlRepos = results.filter(r => 
+  r.topics.some(t => t.includes("machine-learning"))
+);
+
+// Filter by recency (updated in last 30 days)
+const recentRepos = results.filter(r => {
+  const updated = new Date(r.updatedAt);
+  const daysSince = (Date.now() - updated.getTime()) / (1000 * 60 * 60 * 24);
+  return daysSince <= 30;
+});
+
+// Filter by minimum score
+const highQuality = results.filter(r => r.score >= 0.7);
+
+// Take top 10 after filtering
+const filtered = highQuality.slice(0, 10);
+```
+
+## Deduplication
+
+Multiple chunks from the same repository may appear in results. Deduplicate by repository:
+
+```typescript
+const results = await db.findSimilarChunks(queryVector, 50);
+
+// Keep highest-scoring chunk per repository
+const uniqueRepos = new Map<number, SearchResult>();
+for (const result of results) {
+  const existing = uniqueRepos.get(result.repoId);
+  if (!existing || result.score > existing.score) {
+    uniqueRepos.set(result.repoId, result);
+  }
+}
+
+const deduped = Array.from(uniqueRepos.values())
+  .sort((a, b) => b.score - a.score)
+  .slice(0, 10);
+```
+
+## Testing Search
+
+```typescript
+import { describe, it, expect, beforeAll } from "vitest";
+import initSqlJs from "sql.js";
+import { LocalDatabase, runSchema } from "./db/client";
+import { float32ToBlob } from "./embeddings/vector";
+
+describe("semantic search", () => {
+  it("returns hydrated results for top matches", async () => {
+    const SQL = await initSqlJs({
+      locateFile: (file) => `node_modules/sql.js/dist/${file}`
+    });
+    const rawDb = new SQL.Database();
+    runSchema(rawDb);
+    const db = new LocalDatabase({ 
+      sql: SQL, 
+      db: rawDb, 
+      storageMode: "memory" 
+    });
+    
+    // Insert test data
+    await db.upsertRepos([{
+      id: 1,
+      fullName: "acme/graphql-security",
+      name: "graphql-security",
+      description: "GraphQL security tests",
+      topics: ["graphql", "security"],
+      language: "TypeScript",
+      htmlUrl: "https://github.com/acme/graphql-security",
+      stars: 42,
+      forks: 8,
+      updatedAt: "2026-02-16T00:00:00Z",
+      readmeUrl: "https://github.com/acme/graphql-security/blob/main/README.md",
+      readmeText: "GraphQL security tests and fuzzing",
+      checksum: "checksum-1",
+      lastSyncedAt: Date.now()
+    }]);
+    
+    await db.upsertChunks([{
+      id: "chunk-1",
+      repoId: 1,
+      chunkId: "chunk-1",
+      text: "GraphQL security tests and introspection",
+      source: "readme",
+      createdAt: Date.now()
+    }]);
+    
+    const vector = new Float32Array([0.1, 0.2, 0.3, 0.4]);
+    await db.upsertEmbeddings([{
+      id: "emb-1",
+      chunkId: "chunk-1",
+      model: "test-model",
+      dimension: vector.length,
+      vectorBlob: float32ToBlob(vector),
+      createdAt: Date.now()
+    }]);
+    
+    // Search
+    const results = await db.findSimilarChunks(vector, 10);
+    
+    expect(results).toHaveLength(1);
+    expect(results[0].chunkId).toBe("chunk-1");
+    expect(results[0].repoFullName).toBe("acme/graphql-security");
+    expect(results[0].score).toBeGreaterThan(0.99);
+  });
+});
+```
+
+## Types
+
+### SearchResult
+
+```typescript
+type SearchResult = {
+  chunkId: string;
+  repoId: number;
+  score: number;
+  text: string;
+  repoName: string;
+  repoFullName: string;
+  repoDescription: string | null;
+  repoUrl: string;
+  language: string | null;
+  topics: string[];
+  updatedAt: string;
+};
+```

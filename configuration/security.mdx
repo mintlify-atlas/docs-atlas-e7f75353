@@ -1,0 +1,442 @@
+---
+title: Security
+description: Data privacy, security controls, and threat mitigation in GitStarRecall
+---
+
+GitStarRecall is designed with a **local-first, privacy-centric** architecture. This guide covers the security model, data handling practices, and controls available to users.
+
+## Security Principles
+
+<CardGroup cols={2}>
+  <Card title="Local-First" icon="hard-drive">
+    All embeddings and repo content stored locally in SQLite WASM by default
+  </Card>
+  <Card title="Explicit Consent" icon="hand">
+    No data sent to external services without explicit user opt-in
+  </Card>
+  <Card title="Minimal Permissions" icon="shield-check">
+    Request only necessary GitHub scopes for starred repos and READMEs
+  </Card>
+  <Card title="Privacy by Default" icon="eye-slash">
+    Tokens stored in memory only unless encrypted persistence is configured
+  </Card>
+</CardGroup>
+
+## Content Security Policy (CSP)
+
+GitStarRecall enforces strict CSP headers to prevent XSS and code injection attacks.
+
+### Production CSP Configuration
+
+```javascript title="vite.config.ts"
+const PROD_CSP = [
+  "script-src 'self' 'unsafe-eval'",
+  "connect-src 'self' https://api.github.com https://api.openai.com https://api.anthropic.com https://api.deepseek.com https://api.moonshot.cn https://api.moonshot.ai https://api.z.ai https://open.bigmodel.cn https://bigmodel.cn https://huggingface.co https://*.huggingface.co https://hf.co https://*.hf.co https://xethub.hf.co https://*.xethub.hf.co https://cdn-lfs.huggingface.co https://cdn.jsdelivr.net https://raw.githubusercontent.com https://*.githubusercontent.com http://localhost:11434 http://localhost:1234 http://localhost:3001",
+  "default-src 'self'",
+  "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+  "font-src 'self' https://fonts.gstatic.com data:",
+  "img-src 'self' https: data:",
+  "frame-src https://www.youtube.com https://player.vimeo.com",
+  "worker-src 'self' blob:",
+  "object-src 'none'",
+  "base-uri 'self'",
+  "frame-ancestors 'none'"
+].join("; ");
+```
+
+### CSP Directives Explained
+
+| Directive | Policy | Rationale |
+|-----------|--------|----------|
+| `script-src` | `'self' 'unsafe-eval'` | `'unsafe-eval'` required for embedding worker runtime |
+| `connect-src` | Explicit allowlist | Only trusted API endpoints and model hosts |
+| `default-src` | `'self'` | Deny all non-specified origins by default |
+| `style-src` | `'self' 'unsafe-inline'` + Google Fonts | `'unsafe-inline'` for Tailwind/component styles |
+| `worker-src` | `'self' blob:` | Allow Web Workers and blob URLs for embeddings |
+| `object-src` | `'none'` | Block plugins and legacy objects |
+| `frame-ancestors` | `'none'` | Prevent embedding in iframes (clickjacking protection) |
+
+<Info>
+The production CSP includes `'unsafe-eval'` in `script-src` due to runtime requirements of the embedding worker and transformers.js library. This is necessary for WebGPU/WASM execution.
+</Info>
+
+### Additional Security Headers
+
+```javascript
+{
+  "Content-Security-Policy": PROD_CSP,
+  "X-Content-Type-Options": "nosniff",
+  "Referrer-Policy": "strict-origin-when-cross-origin"
+}
+```
+
+- **X-Content-Type-Options:** Prevents MIME-sniffing attacks
+- **Referrer-Policy:** Limits referrer information to same-origin requests
+
+## Data Storage and Privacy
+
+### Local Storage Model
+
+All user data is stored client-side using SQLite WASM with OPFS (Origin Private File System) when available.
+
+<Info>
+**What is stored locally:**
+- Repository metadata (name, description, topics, language)
+- README content (truncated to 100,000 characters)
+- Text chunks and embeddings (384-dimensional vectors)
+- Chat sessions and message history
+- Indexing checkpoints and metadata
+</Info>
+
+### Data That Never Leaves Your Device
+
+- **GitHub tokens** (stored in memory by default)
+- **Private repository content** (unless you opt-in to external LLM)
+- **Embedding vectors** (always generated locally)
+- **Query history** (never sent to servers)
+
+### Data Deletion
+
+Users have full control over local data:
+
+```typescript
+// Delete all local data (repos, embeddings, chat history)
+await database.clearAllData();
+
+// Clear token from memory
+logout();
+
+// Delete chat backup (IndexedDB + localStorage)
+await clearChatBackup();
+```
+
+<Warning>
+**"Delete all data"** is permanent and cannot be undone. You will need to re-sync stars and re-generate embeddings after deletion.
+</Warning>
+
+## Token Handling
+
+### GitHub OAuth (Recommended)
+
+GitStarRecall uses OAuth with PKCE (Proof Key for Code Exchange) for secure authentication.
+
+**Security features:**
+- Code verifier stored in sessionStorage (not localStorage)
+- Tokens never appear in URLs
+- Client secret kept on backend only
+- Automatic token refresh via backend exchange endpoint
+
+**OAuth Scopes:**
+```json
+["read:user", "repo"]
+```
+
+<Note>
+The `repo` scope is broad (full repository access). This is currently required for GitHub's starred repos API. Fine-grained tokens are recommended if using Personal Access Tokens (PAT).
+</Note>
+
+### Personal Access Tokens (PAT)
+
+PAT authentication is supported but discouraged.
+
+<Warning>
+**Using a PAT?** You'll see a security warning in the app. Prefer OAuth for better security and automatic token rotation.
+</Warning>
+
+**If you must use a PAT:**
+- Use **fine-grained tokens** with minimal permissions
+- Grant only **read-only access** to `Contents` and `Starring`
+- Set **expiration** to 90 days or less
+- Never commit PATs to version control
+
+### Token Storage Options
+
+| Storage Method | Security | Persistence | Recommended |
+|----------------|----------|-------------|-------------|
+| **Memory only** (default) | ✅ Highest | ❌ Session only | ✅ Yes |
+| **Encrypted localStorage** | ⚠️ Moderate | ✅ Persistent | ⚠️ Only if needed |
+
+<ParamField path="VITE_LLM_SETTINGS_ENCRYPTION_KEY" type="string">
+  Optional 32-byte hex/base64 key for encrypting API keys in localStorage.
+  
+  **Warning:** This key is embedded in the client bundle. It protects against casual localStorage exfiltration but not against attackers with app source access.
+</ParamField>
+
+```bash title=".env.local (if persistence required)"
+# Generate with: openssl rand -hex 32
+VITE_LLM_SETTINGS_ENCRYPTION_KEY=a1b2c3d4e5f6...
+```
+
+<Info>
+**Recommendation:** Leave `VITE_LLM_SETTINGS_ENCRYPTION_KEY` unset unless you need persistent login across browser sessions. Tokens in memory-only mode are cleared on tab close.
+</Info>
+
+## README Sanitization
+
+All README content is sanitized before rendering to prevent XSS attacks.
+
+```tsx title="src/components/SafeMarkdown.tsx"
+import ReactMarkdown from 'react-markdown';
+import rehypeSanitize from 'rehype-sanitize';
+
+<ReactMarkdown rehypePlugins={[rehypeSanitize]}>
+  {readmeContent}
+</ReactMarkdown>
+```
+
+**Sanitization protections:**
+- Strips `<script>` tags and event handlers
+- Removes `javascript:` URLs
+- Blocks `data:` URLs (except images)
+- Filters dangerous HTML attributes
+- Preserves safe markdown formatting
+
+<Warning>
+Never use `dangerouslySetInnerHTML` for user-provided content. All README rendering goes through `rehype-sanitize`.
+</Warning>
+
+## External LLM Usage
+
+### Opt-In Model
+
+By default, **no data is sent to external services**. LLM features require explicit consent.
+
+<ParamField path="allowRemoteProvider" type="boolean" default="false">
+  Enable sending data to remote LLM providers (OpenAI, Anthropic, etc.).
+</ParamField>
+
+<ParamField path="allowLocalProvider" type="boolean" default="false">
+  Enable sending data to local LLM providers (Ollama, LM Studio).
+</ParamField>
+
+### Remote Providers
+
+When `allowRemoteProvider` is enabled:
+
+- Only **top-8 chunks** are sent with each query (not full READMEs)
+- User queries and LLM responses are stored locally only
+- API keys are managed via in-app settings (optionally encrypted)
+
+**Supported providers:**
+- OpenAI (GPT-4, GPT-3.5)
+- Anthropic (Claude)
+- DeepSeek
+- Moonshot
+- Zhipu AI (GLM)
+- Custom OpenAI-compatible endpoints
+
+<Warning>
+Enabling remote providers means repository content will leave your device and be sent to the selected LLM service. Review the provider's privacy policy before enabling.
+</Warning>
+
+### Local Providers
+
+Local providers run on your machine and never send data to the internet.
+
+**Ollama Integration:**
+```bash title=".env.local"
+VITE_OLLAMA_BASE_URL=http://localhost:11434
+VITE_OLLAMA_MODEL=nomic-embed-text
+```
+
+**Security restrictions:**
+- Endpoint **must** be `localhost`, `127.0.0.1`, or `[::1]`
+- Non-local endpoints are rejected with an error
+- No GitHub token or PAT is sent to Ollama
+- Only text chunks and model parameters are transmitted
+
+<Info>
+Local providers require `allowLocalProvider=true` in the app settings. They are clearly labeled "Local (Ollama)" in the UI.
+</Info>
+
+### WebLLM Browser Provider
+
+Run LLM inference entirely in the browser using WebGPU.
+
+**Security features:**
+- Models downloaded from trusted CDN (Hugging Face)
+- CSP `connect-src` restricts download sources
+- Explicit user consent before multi-GB download begins
+- All inference runs locally (no network requests after download)
+- Model recommendation based on device capabilities
+
+**Enable WebLLM:**
+```bash title=".env.local"
+VITE_WEBLLM_ENABLED=1
+```
+
+<Note>
+WebLLM is experimental and requires WebGPU support. Models are 500MB-2GB+ and cached in browser storage.
+</Note>
+
+## Embedding Security
+
+### Local Embedding (Default)
+
+Embeddings are generated in-browser using `@xenova/transformers`.
+
+**Security guarantees:**
+- Model: `all-MiniLM-L6-v2` (384 dimensions)
+- Source: Hugging Face CDN (allowlisted in CSP)
+- Execution: WebGPU or WASM (no external API calls)
+- Storage: SQLite WASM (OPFS or in-memory)
+
+**No data transmitted:**
+- README text never leaves your device
+- Embeddings generated locally
+- Vector index built client-side
+
+### Optional Ollama Embeddings
+
+For faster embeddings on high-performance hardware.
+
+**Trust boundary:**
+```typescript
+// Localhost-only validation
+const url = new URL(baseUrl);
+const isLocalhost = 
+  url.hostname === 'localhost' ||
+  url.hostname === '127.0.0.1' ||
+  url.hostname === '[::1]';
+
+if (!isLocalhost) {
+  throw new Error('Ollama endpoint must be localhost');
+}
+```
+
+<Warning>
+Ollama embedding requests contain README text chunks. Ensure your Ollama instance is trusted and running on your local machine only.
+</Warning>
+
+## Threat Model (STRIDE)
+
+GitStarRecall follows the STRIDE threat modeling framework.
+
+### Spoofing
+
+**Mitigations:**
+- OAuth with PKCE (code challenge prevents replay)
+- Tokens never in URLs or localStorage (unless encrypted)
+- PAT usage triggers security warning
+
+### Tampering
+
+**Mitigations:**
+- README sanitization via `rehype-sanitize`
+- CSP blocks inline scripts and untrusted origins
+- Checksum validation for repo/README integrity
+- No user input in raw SQL queries
+
+### Repudiation
+
+**Mitigations:**
+- Embedding run metadata (backend, pool size, timestamp)
+- Sync phase tracking (last sync, indexing status)
+- Opt-in gates for remote LLM usage
+
+<Note>
+**Planned improvement:** Add explicit "data sent" notice when remote LLM is enabled.
+</Note>
+
+### Information Disclosure
+
+**Mitigations:**
+- External LLM off by default (explicit opt-in)
+- Only top-8 chunks sent to LLM (not full READMEs)
+- Tokens in memory or encrypted storage only
+- Chat history local-only and wipeable
+- Production logs avoid token/content disclosure
+
+### Denial of Service
+
+**Mitigations:**
+- GitHub rate limit handling with exponential backoff
+- Concurrency caps (6 concurrent README fetches)
+- README truncation (100,000 character limit)
+- Web Worker isolation for embeddings
+- Queue depth limits (1,024 max)
+- Adaptive batch downshifting on memory pressure
+
+### Elevation of Privilege
+
+**Mitigations:**
+- Minimal GitHub scopes (read-only access)
+- Local endpoints clearly labeled and opt-in
+- Browser embedding default (no elevated trust)
+- CSP restricts code execution origins
+
+## Security Best Practices
+
+### For Users
+
+<Steps>
+  <Step title="Use OAuth instead of PAT">
+    OAuth provides automatic token rotation and narrower trust boundaries.
+  </Step>
+  <Step title="Review LLM provider privacy policies">
+    Understand where your data goes before enabling remote providers.
+  </Step>
+  <Step title="Keep tokens in memory only">
+    Avoid setting `VITE_LLM_SETTINGS_ENCRYPTION_KEY` unless persistence is required.
+  </Step>
+  <Step title="Use 'Delete all data' when needed">
+    Remove all local data before uninstalling or switching accounts.
+  </Step>
+</Steps>
+
+### For Developers
+
+<Steps>
+  <Step title="Never log tokens or README content">
+    Production logs should contain only IDs, counts, and timings.
+  </Step>
+  <Step title="Validate all external endpoints">
+    Enforce localhost-only for Ollama; use CSP allowlists for CDNs.
+  </Step>
+  <Step title="Sanitize all user-provided content">
+    Use `rehype-sanitize` for markdown; never use `dangerouslySetInnerHTML`.
+  </Step>
+  <Step title="Keep CSP strict and up-to-date">
+    Document all `unsafe-*` directives and remove when possible.
+  </Step>
+</Steps>
+
+## Residual Risks
+
+Despite mitigations, some risks remain:
+
+<Warning>
+**User-accepted risks:**
+- If you enable external LLMs, repo content leaves your browser
+- If your device is compromised, local storage can be accessed
+- GPU/driver variability may affect WebGPU acceleration consistency
+- CSP `'unsafe-eval'` is required for transformers.js (cannot be removed)
+</Warning>
+
+## Security Audit History
+
+| Date | Type | Status | Notes |
+|------|------|--------|-------|
+| 2026-02-24 | WebLLM integration review | ✅ Aligned | Consent gate, trusted CDN, capability recommendation |
+| 2026-02-23 | Embedding pipeline v2 | ✅ Aligned | Localhost-only Ollama, metadata tracking, resilient retry |
+| 2026-02 | STRIDE threat modeling | ✅ Complete | See `docs/security-review-stride.md` |
+
+## Reporting Security Issues
+
+If you discover a security vulnerability:
+
+1. **Do not** open a public GitHub issue
+2. Email security contact (see repository `SECURITY.md`)
+3. Include steps to reproduce and impact assessment
+4. Allow 90 days for coordinated disclosure
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Environment Variables" icon="gear" href="/configuration/environment-variables">
+    Configure security-related environment variables
+  </Card>
+  <Card title="Performance Tuning" icon="gauge-high" href="/configuration/performance-tuning">
+    Optimize without compromising security
+  </Card>
+</CardGroup>

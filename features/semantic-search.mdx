@@ -1,0 +1,216 @@
+---
+title: Semantic Search
+description: Find repositories using natural language queries powered by local embeddings
+---
+
+GitStarRecall uses semantic search to help you find repositories based on meaning rather than exact keyword matches. Ask questions in natural language and get relevant results from your starred repositories.
+
+## How It Works
+
+Semantic search transforms your repositories into vector embeddings that capture their meaning, enabling intelligent search across your GitHub stars.
+
+### Vector Embeddings
+
+Each repository is converted into a mathematical representation (embedding) that captures its semantic meaning:
+
+1. **Repository Metadata**: Name, description, language, topics
+2. **README Content**: Normalized and chunked documentation
+3. **Embedding Generation**: Converted to 384-dimensional vectors using local models
+
+<CodeGroup>
+```typescript Chunking Logic
+// Adaptive chunk sizing based on README length
+function resolveChunkConfig(textLength: number) {
+  if (textLength <= 3_000) {
+    return { size: 900, overlap: 140 };  // Short docs
+  }
+  if (textLength <= 15_000) {
+    return { size: 760, overlap: 110 };  // Medium docs
+  }
+  return { size: 640, overlap: 90 };     // Long docs
+}
+```
+
+```typescript Metadata Header
+function buildMetadataHeader(repo: RepoRecord): string {
+  const parts = [`Repository: ${repo.fullName}`];
+  if (repo.description) {
+    parts.push(`Description: ${repo.description}`);
+  }
+  if (repo.language) {
+    parts.push(`Language: ${repo.language}`);
+  }
+  if (repo.topics.length > 0) {
+    parts.push(`Topics: ${repo.topics.join(", ")}`);
+  }
+  return parts.join("\n");
+}
+```
+</CodeGroup>
+
+### Similarity Search
+
+When you search, GitStarRecall:
+
+1. Converts your query into an embedding vector
+2. Computes cosine similarity against all repository embeddings
+3. Returns the most semantically similar repositories
+
+```typescript Cosine Similarity
+function cosineSimilarity(a: Float32Array, b: Float32Array): number {
+  let dot = 0;
+  let normA = 0;
+  let normB = 0;
+
+  for (let i = 0; i < a.length; i++) {
+    dot += a[i] * b[i];
+    normA += a[i] * a[i];
+    normB += b[i] * b[i];
+  }
+
+  return dot / (Math.sqrt(normA) * Math.sqrt(normB));
+}
+```
+
+## Natural Language Queries
+
+Search using conversational language instead of keywords:
+
+<CardGroup cols={2}>
+  <Card title="Traditional Keyword" icon="magnifying-glass">
+    `react hooks state management`
+  </Card>
+  <Card title="Natural Language" icon="message">
+    "What are good libraries for managing state in React applications?"
+  </Card>
+</CardGroup>
+
+### Query Examples
+
+<AccordionGroup>
+  <Accordion title="Finding Tools by Purpose">
+    - "Command line tools for database management"
+    - "Libraries for parsing configuration files"
+    - "Tools to improve developer productivity"
+  </Accordion>
+
+  <Accordion title="Technology Comparisons">
+    - "Lightweight alternatives to Webpack"
+    - "Modern CSS frameworks similar to Tailwind"
+    - "GraphQL clients for React"
+  </Accordion>
+
+  <Accordion title="Problem-Specific Searches">
+    - "How to handle file uploads in Express"
+    - "Testing frameworks for TypeScript"
+    - "Authentication libraries for Node.js"
+  </Accordion>
+</AccordionGroup>
+
+## Search Results
+
+Results include context from matching repository chunks:
+
+```typescript Search Result Structure
+type SearchResult = {
+  chunkId: string;           // Unique chunk identifier
+  score: number;             // Similarity score (0-1)
+  text: string;              // Matching chunk text
+  repoId: number;
+  repoName: string;
+  repoFullName: string;
+  repoDescription: string | null;
+  repoUrl: string;
+  language: string | null;
+  topics: string[];
+  updatedAt: string;
+};
+```
+
+### Filtering Results
+
+Refine search results using filters:
+
+- **Language**: Filter by programming language
+- **Topics**: Filter by repository topics
+- **Recency**: Filter by last updated date
+
+<Note>
+  Filters are applied **after** semantic search to preserve ranking quality.
+</Note>
+
+## Performance
+
+Semantic search is optimized for browser environments:
+
+<Steps>
+  <Step title="In-Memory Cache">
+    Embeddings are cached in memory for instant repeated queries
+  </Step>
+  
+  <Step title="Indexed Storage">
+    Vector index is stored in SQLite with OPFS or localStorage backend
+  </Step>
+  
+  <Step title="Efficient Similarity">
+    Cosine similarity computed using optimized Float32Array operations
+  </Step>
+</Steps>
+
+### Search Performance Characteristics
+
+| Repositories | Embeddings | Search Time |
+|--------------|------------|-------------|
+| 100          | ~200       | &lt;50ms    |
+| 500          | ~1000      | &lt;200ms   |
+| 1000         | ~2000      | &lt;400ms   |
+
+<Tip>
+  All computations run locally in your browser. No data is sent to external servers.
+</Tip>
+
+## Best Practices
+
+<CardGroup cols={2}>
+  <Card title="Be Specific" icon="bullseye">
+    Include relevant details about your use case
+    
+    **Good**: "Python libraries for processing CSV files"
+    
+    **Better**: "Fast Python libraries for parsing large CSV files with data validation"
+  </Card>
+
+  <Card title="Use Filters" icon="filter">
+    Combine semantic search with filters for precision
+    
+    Search: "web frameworks"
+    
+    Filter: Language = JavaScript, Updated within 1 year
+  </Card>
+
+  <Card title="Multiple Attempts" icon="arrows-rotate">
+    Try different phrasings if results aren't relevant
+    
+    "state management" → "managing application state" → "global state libraries"
+  </Card>
+
+  <Card title="Check Context" icon="book">
+    Review the chunk text to understand why a repository matched
+  </Card>
+</CardGroup>
+
+## Related Features
+
+<CardGroup cols={3}>
+  <Card title="Local Embeddings" icon="microchip" href="/features/embeddings">
+    Learn about WebGPU/WASM embedding generation
+  </Card>
+  
+  <Card title="Chat Sessions" icon="comments" href="/features/chat-sessions">
+    Ask follow-up questions about search results
+  </Card>
+  
+  <Card title="Local LLM" icon="brain" href="/features/local-llm">
+    Run language models entirely in your browser
+  </Card>
+</CardGroup>

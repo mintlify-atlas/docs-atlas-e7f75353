@@ -1,0 +1,281 @@
+---
+title: 'Local Development'
+description: 'Set up and run GitStarRecall locally for development'
+---
+
+## Prerequisites
+
+Before you begin, ensure you have the following installed:
+
+- **Node.js 20+** - Runtime environment
+- **pnpm 9+** - Package manager
+- **GitHub account** with either:
+  - GitHub OAuth app (recommended), or
+  - Personal Access Token (PAT) as fallback
+
+### Optional Runtime Tools
+
+- **Ollama** - For local embeddings and local chat provider
+- **WebGPU-capable browser** - For browser embedding acceleration and WebLLM
+
+## Installation
+
+<Steps>
+  <Step title="Clone the repository">
+    Clone the GitStarRecall repository to your local machine:
+    
+    ```bash
+    git clone https://github.com/Abhinandan-Khurana/GitStarRecall.git
+    cd GitStarRecall
+    ```
+  </Step>
+
+  <Step title="Install dependencies">
+    Install project dependencies using pnpm:
+    
+    ```bash
+    pnpm install
+    ```
+  </Step>
+
+  <Step title="Configure environment variables">
+    Copy the example environment file and configure your settings:
+    
+    ```bash
+    cp .env.example .env
+    ```
+    
+    Edit `.env` and configure the required variables (see [Environment Configuration](#environment-configuration) below).
+  </Step>
+
+  <Step title="Start development server">
+    Run the Vite development server:
+    
+    ```bash
+    pnpm dev
+    ```
+    
+    The application will be available at `http://localhost:5173`
+  </Step>
+</Steps>
+
+## Environment Configuration
+
+### Required OAuth Variables
+
+For client-side OAuth flow:
+
+```bash
+VITE_GITHUB_CLIENT_ID=your_github_oauth_client_id
+VITE_GITHUB_REDIRECT_URI=http://localhost:5173/auth/callback
+VITE_GITHUB_OAUTH_EXCHANGE_URL=/api/github/oauth/exchange
+```
+
+For server-side OAuth exchange endpoint (`api/github/oauth/exchange.js`):
+
+```bash
+GITHUB_OAUTH_CLIENT_ID=your_github_oauth_client_id
+GITHUB_OAUTH_CLIENT_SECRET=your_github_oauth_client_secret
+GITHUB_OAUTH_REDIRECT_URI=http://localhost:5173/auth/callback
+```
+
+<Warning>
+The redirect URI values must match exactly between your `.env` file and your GitHub OAuth app settings.
+</Warning>
+
+### Optional Runtime Flags
+
+#### Embedding Configuration
+
+```bash
+# Backend preference: webgpu (GPU with WASM fallback) or wasm (CPU only)
+VITE_EMBEDDING_BACKEND_PREFERRED=webgpu
+
+# Performance tuning (pool size: 1-2, batch size: 1-32)
+VITE_EMBEDDING_POOL_SIZE=1
+VITE_EMBEDDING_WORKER_BATCH_SIZE=12
+VITE_EMBEDDING_DB_WRITE_BATCH_SIZE=512
+VITE_EMBEDDING_UI_UPDATE_MS=350
+```
+
+#### Large Library Mode
+
+```bash
+# Enable optimizations for 500+ starred repos
+VITE_EMBEDDING_LARGE_LIBRARY_MODE=1
+VITE_EMBEDDING_LARGE_LIBRARY_THRESHOLD=500
+```
+
+#### README Pipeline
+
+```bash
+# Enable staged README pipeline with adaptive concurrency
+VITE_README_BATCH_PIPELINE_V2=1
+VITE_README_BATCH_SIZE=40
+VITE_EMBED_TRIGGER_THRESHOLD=256
+VITE_EMBED_WINDOW_SIZE=512
+```
+
+#### Ollama Integration
+
+```bash
+VITE_OLLAMA_BASE_URL=http://localhost:11434
+VITE_OLLAMA_MODEL=nomic-embed-text
+VITE_OLLAMA_TIMEOUT_MS=30000
+```
+
+#### WebLLM Provider
+
+```bash
+# Enable browser-based WebLLM (0 or 1)
+VITE_WEBLLM_ENABLED=0
+```
+
+#### API Key Encryption
+
+```bash
+# Optional: 32-byte hex key for encrypting stored LLM API keys
+# Generate with: openssl rand -hex 32
+VITE_LLM_SETTINGS_ENCRYPTION_KEY=
+```
+
+## GitHub OAuth App Setup
+
+<Steps>
+  <Step title="Create OAuth App">
+    Go to [GitHub Developer Settings](https://github.com/settings/developers) and create a new OAuth App.
+  </Step>
+
+  <Step title="Configure callback URL">
+    Set the **Authorization callback URL** to:
+    
+    ```
+    http://localhost:5173/auth/callback
+    ```
+  </Step>
+
+  <Step title="Copy credentials">
+    Copy the **Client ID** and **Client Secret** from GitHub and add them to your `.env` file:
+    
+    - `VITE_GITHUB_CLIENT_ID`
+    - `GITHUB_OAUTH_CLIENT_ID`
+    - `GITHUB_OAUTH_CLIENT_SECRET`
+  </Step>
+
+  <Step title="Verify redirect URI">
+    Ensure both `VITE_GITHUB_REDIRECT_URI` and `GITHUB_OAUTH_REDIRECT_URI` match your callback URL exactly.
+  </Step>
+</Steps>
+
+<Warning>
+Mismatched redirect URI or client ID will cause OAuth exchange failures.
+</Warning>
+
+## Development Commands
+
+All available development commands from `package.json`:
+
+```bash
+# Start Vite dev server
+pnpm dev
+
+# Type-check and build for production
+pnpm build
+
+# Preview production build locally
+pnpm preview
+
+# Run ESLint
+pnpm lint
+
+# Run Vitest test suite
+pnpm test
+
+# Run tests in watch mode
+pnpm test:watch
+
+# Format code with Prettier
+pnpm format
+
+# Run full CI pipeline (lint + test + build)
+pnpm ci
+```
+
+## Setting Up Ollama (Optional)
+
+If you want to use Ollama for local embeddings:
+
+<Steps>
+  <Step title="Expose Ollama to CORS">
+    ```bash
+    export OLLAMA_ORIGINS="*"
+    ```
+  </Step>
+
+  <Step title="Start Ollama server">
+    ```bash
+    ollama serve
+    ```
+  </Step>
+
+  <Step title="Pull embedding model">
+    ```bash
+    ollama pull nomic-embed-text
+    ```
+  </Step>
+
+  <Step title="Enable in app">
+    - In the GitStarRecall UI, enable "Use Ollama for local embeddings"
+    - Keep base URL as `http://localhost:11434`
+    - Click "Test connection"
+    - Run "Fetch Stars" to index with Ollama
+  </Step>
+</Steps>
+
+<Note>
+If Ollama goes down, the app automatically falls back to browser embedding.
+</Note>
+
+## Performance Tuning
+
+### For Memory-Constrained Systems
+
+```bash
+VITE_EMBEDDING_POOL_SIZE=1
+VITE_EMBEDDING_WORKER_BATCH_SIZE=8
+VITE_EMBEDDING_BACKEND_PREFERRED=wasm
+```
+
+### For Large Star Collections (500-1500+ repos)
+
+```bash
+VITE_README_BATCH_PIPELINE_V2=1
+VITE_EMBEDDING_LARGE_LIBRARY_MODE=1
+```
+
+- Use checkpoint resume behavior to avoid full re-syncs
+- Only run "Fetch Stars" when you need latest changes
+- Monitor indexing telemetry in the UI
+
+## Troubleshooting
+
+### OAuth callback 404
+
+- Verify callback URL in GitHub OAuth app settings
+- Ensure `VITE_GITHUB_REDIRECT_URI` and `GITHUB_OAUTH_REDIRECT_URI` are exact matches
+- Check that `/auth/callback` routes to the SPA entry point
+
+### PAT 401 / auth errors
+
+- Use raw token only (no `Bearer ` prefix)
+- Verify token scopes allow reading `/user/starred` and required repos
+
+### localStorage quota exceeded
+
+- App may enter memory-only fallback mode
+- Use "Delete local data" in UI, then re-index incrementally
+
+### WebLLM suggests low model on strong desktop
+
+- Check recommendation diagnostics in UI (reason, webgpu, cores, memory, perf)
+- Manual model selection is supported in chat settings

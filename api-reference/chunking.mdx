@@ -1,0 +1,373 @@
+---
+title: "Chunking Engine"
+description: "Text chunking utilities for repository README processing and embedding preparation"
+---
+
+## Overview
+
+The chunking module splits repository metadata and README content into overlapping text windows optimized for semantic embedding. Each repository generates at least one chunk, ensuring representation in the vector index.
+
+## Repository Chunking
+
+### chunkRepo()
+
+Create chunks for a single repository.
+
+```typescript
+import { chunkRepo } from "./chunking/chunker";
+import type { RepoRecord } from "./db/types";
+
+const repo: RepoRecord = {
+  id: 123456,
+  fullName: "owner/semantic-search",
+  name: "semantic-search",
+  description: "Vector search library for repositories",
+  topics: ["vector-search", "embeddings", "semantic"],
+  language: "TypeScript",
+  htmlUrl: "https://github.com/owner/semantic-search",
+  stars: 1500,
+  forks: 42,
+  updatedAt: "2026-03-01T00:00:00Z",
+  readmeUrl: "https://github.com/owner/semantic-search/blob/main/README.md",
+  readmeText: "# Semantic Search\n\nA library for...",
+  checksum: "sha256-abc123",
+  lastSyncedAt: Date.now()
+};
+
+const chunks = chunkRepo(repo);
+console.log(`Generated ${chunks.length} chunks`);
+console.log(`First chunk ID: ${chunks[0].id}`);
+// Generated 2 chunks
+// First chunk ID: 123456:0
+```
+
+<ParamField path="repo" type="RepoRecord" required>
+  Repository record with metadata and optional README text
+</ParamField>
+
+<ResponseField name="Returns" type="ChunkRecord[]">
+  Array of chunk records ready for `upsertChunks()`. Always returns at least one chunk.
+</ResponseField>
+
+### chunkRepos()
+
+Chunk multiple repositories in batch.
+
+```typescript
+import { chunkRepos } from "./chunking/chunker";
+
+const repos = db.listRepos();
+const allChunks = chunkRepos(repos);
+
+await db.upsertChunks(allChunks);
+console.log(`Chunked ${repos.length} repos into ${allChunks.length} chunks`);
+```
+
+<ParamField path="repos" type="RepoRecord[]" required>
+  Array of repository records
+</ParamField>
+
+<ResponseField name="Returns" type="ChunkRecord[]">
+  Flat array of all chunks from all repositories
+</ResponseField>
+
+## Chunk Configuration
+
+Chunk size and overlap adapt based on document length:
+
+| Document Length | Chunk Size | Overlap | Use Case |
+|----------------|------------|---------|----------|
+| ≤ 3,000 chars  | 900        | 140     | Short READMEs with dense info |
+| ≤ 15,000 chars | 760        | 110     | Medium READMEs |
+| > 15,000 chars | 640        | 90      | Long READMEs with redundancy |
+
+Constants (from source):
+
+```typescript
+const SHORT_DOC_CHUNK_SIZE = 900;
+const MEDIUM_DOC_CHUNK_SIZE = 760;
+const LONG_DOC_CHUNK_SIZE = 640;
+const SHORT_DOC_OVERLAP = 140;
+const MEDIUM_DOC_OVERLAP = 110;
+const LONG_DOC_OVERLAP = 90;
+const MAX_README_LENGTH = 100_000;
+```
+
+## Text Normalization
+
+### normalizeText()
+
+Strip markdown and HTML formatting for cleaner embeddings.
+
+```typescript
+import { normalizeText } from "./chunking/chunker";
+
+const raw = `
+# Project Title
+
+Some **bold text** and a [link](https://example.com).
+
+![image](img.png)
+
+\`\`\`typescript
+const code = 'removed';
+\`\`\`
+
+- List item
+- Another item
+`;
+
+const normalized = normalizeText(raw);
+console.log(normalized);
+// "Project Title Some bold text and a link. List item Another item"
+```
+
+<ParamField path="raw" type="string" required>
+  Raw markdown or HTML text
+</ParamField>
+
+<ResponseField name="Returns" type="string">
+  Normalized plain text with:
+  - HTML tags removed
+  - HTML entities removed
+  - Markdown images removed
+  - Markdown links converted to text
+  - Code blocks and inline code removed
+  - Heading markers removed
+  - Emphasis markers removed
+  - List markers removed
+  - Whitespace collapsed to single spaces
+  - Leading/trailing whitespace trimmed
+</ResponseField>
+
+## Chunk Structure
+
+Each chunk includes a metadata header followed by README content:
+
+```typescript
+// Example chunk text
+const chunkText = `
+Repository: owner/semantic-search
+Description: Vector search library for repositories
+Language: TypeScript
+Topics: vector-search, embeddings, semantic
+
+Semantic Search A library for finding similar repositories using vector embeddings...
+`.trim();
+```
+
+Metadata header format:
+
+```typescript
+function buildMetadataHeader(repo: RepoRecord): string {
+  const parts: string[] = [`Repository: ${repo.fullName}`];
+  
+  if (repo.description) {
+    parts.push(`Description: ${repo.description}`);
+  }
+  
+  if (repo.language) {
+    parts.push(`Language: ${repo.language}`);
+  }
+  
+  if (repo.topics.length > 0) {
+    parts.push(`Topics: ${repo.topics.join(", ")}`);
+  }
+  
+  return parts.join("\n");
+}
+```
+
+## Chunk IDs
+
+Chunk IDs are deterministic and follow the format `{repoId}:{index}`:
+
+```typescript
+// Repository 123456 with 3 chunks:
+const chunks = chunkRepo(repo);
+// chunks[0].id === "123456:0"
+// chunks[1].id === "123456:1"
+// chunks[2].id === "123456:2"
+
+// Chunk IDs allow safe upserts without duplication
+await db.upsertChunks(chunks); // First insert
+await db.upsertChunks(chunks); // Idempotent update
+```
+
+## Overlapping Windows
+
+Chunks overlap to preserve context across boundaries:
+
+```typescript
+function splitIntoChunks(text: string, size: number, overlap: number): string[] {
+  if (size <= 0 || overlap < 0 || overlap >= size) {
+    throw new Error("Invalid chunk window configuration");
+  }
+  
+  if (text.length === 0) {
+    return [""]; // Always at least one chunk
+  }
+  
+  const chunks: string[] = [];
+  let start = 0;
+  
+  while (start < text.length) {
+    chunks.push(text.slice(start, start + size));
+    start += size - overlap;
+  }
+  
+  return chunks;
+}
+```
+
+Example with size=10, overlap=3:
+
+```typescript
+const text = "0123456789ABCDEFGHIJ";
+const chunks = splitIntoChunks(text, 10, 3);
+// chunks[0] = "0123456789" (chars 0-9)
+// chunks[1] = "789ABCDEFG" (chars 7-16, overlap: "789")
+// chunks[2] = "EFGHIJ"     (chars 14-19, overlap: "EFG")
+```
+
+## Complete Example
+
+```typescript
+import { chunkRepos, normalizeText } from "./chunking/chunker";
+import { getDb } from "./db/client";
+
+async function indexRepositories(repos: RepoRecord[]) {
+  const db = await getDb();
+  
+  // Store repositories
+  await db.upsertRepos(repos);
+  
+  // Generate and store chunks
+  const chunks = chunkRepos(repos);
+  await db.upsertChunks(chunks);
+  
+  console.log(`Indexed ${repos.length} repos`);
+  console.log(`Generated ${chunks.length} chunks`);
+  console.log(`Average chunks per repo: ${(chunks.length / repos.length).toFixed(1)}`);
+  
+  // Inspect first chunk
+  const first = chunks[0];
+  console.log(`\nFirst chunk (${first.id}):`);
+  console.log(`Length: ${first.text.length} chars`);
+  console.log(`Source: ${first.source}`);
+  console.log(`Preview: ${first.text.slice(0, 100)}...`);
+}
+
+// Usage
+const repos = await fetchStarredRepos();
+await indexRepositories(repos);
+```
+
+## Testing
+
+```typescript
+import { describe, test, expect } from "vitest";
+import { chunkRepo, normalizeText } from "./chunking/chunker";
+import type { RepoRecord } from "./db/types";
+
+function makeRepo(overrides: Partial<RepoRecord> = {}): RepoRecord {
+  return {
+    id: 1,
+    fullName: "owner/repo",
+    name: "repo",
+    description: "A test repo",
+    topics: ["vector", "search"],
+    language: "TypeScript",
+    htmlUrl: "https://github.com/owner/repo",
+    stars: 100,
+    forks: 10,
+    updatedAt: "2026-01-01T00:00:00Z",
+    readmeUrl: "https://github.com/owner/repo/blob/main/README.md",
+    readmeText: "# Title\n\nSome **markdown** with [link](https://example.com)",
+    checksum: "checksum",
+    lastSyncedAt: 1,
+    ...overrides
+  };
+}
+
+describe("chunker", () => {
+  test("normalizeText strips markdown/html noise", () => {
+    const normalized = normalizeText(
+      "<h1>Hello</h1>\n![img](x)\n[Docs](https://x)\n`code`\n\n- item"
+    );
+    
+    expect(normalized).toContain("Hello");
+    expect(normalized).toContain("Docs");
+    expect(normalized).not.toContain("<h1>");
+    expect(normalized).not.toContain("![img]");
+  });
+  
+  test("chunkRepo returns deterministic chunk ids tied to repo id", () => {
+    const repo = makeRepo({ id: 42 });
+    const chunks = chunkRepo(repo);
+    
+    expect(chunks.length).toBeGreaterThan(0);
+    expect(chunks[0].id).toBe("42:0");
+    expect(chunks.every(chunk => chunk.repoId === 42)).toBe(true);
+  });
+  
+  test("chunkRepo always returns at least one chunk", () => {
+    const emptyRepo = makeRepo({ readmeText: null });
+    const chunks = chunkRepo(emptyRepo);
+    
+    expect(chunks).toHaveLength(1);
+    expect(chunks[0].source).toBe("metadata");
+    expect(chunks[0].text).toContain("Repository: owner/repo");
+  });
+});
+```
+
+## Types
+
+### ChunkRecord
+
+```typescript
+type ChunkRecord = {
+  id: string;           // Format: "repoId:index"
+  repoId: number;       // GitHub repository ID
+  chunkId: string;      // Same as id (for consistency)
+  text: string;         // Metadata header + normalized README
+  source: string;       // "metadata" or "metadata+readme"
+  createdAt: number;    // Timestamp (milliseconds since epoch)
+};
+```
+
+### RepoRecord
+
+```typescript
+type RepoRecord = {
+  id: number;
+  fullName: string;
+  name: string;
+  description: string | null;
+  topics: string[];
+  language: string | null;
+  htmlUrl: string;
+  stars: number;
+  forks: number;
+  updatedAt: string;
+  readmeUrl: string | null;
+  readmeText: string | null;
+  readmeEtag?: string | null;
+  readmeLastModified?: string | null;
+  checksum: string | null;
+  lastSyncedAt: number;
+};
+```
+
+## Constants
+
+```typescript
+const SHORT_DOC_CHUNK_SIZE = 900;
+const MEDIUM_DOC_CHUNK_SIZE = 760;
+const LONG_DOC_CHUNK_SIZE = 640;
+const SHORT_DOC_OVERLAP = 140;
+const MEDIUM_DOC_OVERLAP = 110;
+const LONG_DOC_OVERLAP = 90;
+const MAX_README_LENGTH = 100_000;
+```

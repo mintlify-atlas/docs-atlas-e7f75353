@@ -1,0 +1,590 @@
+---
+title: "Star Synchronization"
+description: "Sync GitHub starred repositories and README content"
+---
+
+## Overview
+
+The sync system fetches starred repositories from GitHub, downloads README files, and maintains a local database with intelligent change detection and incremental updates.
+
+## GitHub API Client
+
+### Creating a Client
+
+Create a GitHub API client for fetching stars and READMEs.
+
+```typescript
+import { createGitHubApiClient } from "@/github/client";
+
+const client = createGitHubApiClient({
+  accessToken: "ghp_your_token_here",
+  perPage: 100,           // Optional: repos per page (1-100)
+  maxRetries: 5,          // Optional: max retry attempts
+  maxPages: undefined,    // Optional: limit page fetching
+});
+```
+
+**Configuration:**
+
+<ParamField path="accessToken" type="string" required>
+  GitHub access token with `read:user` and `repo` scopes. Automatically normalized (strips "Bearer"/"token" prefixes and quotes).
+</ParamField>
+
+<ParamField path="fetchImpl" type="typeof fetch">
+  Custom fetch implementation. Defaults to `globalThis.fetch`.
+</ParamField>
+
+<ParamField path="logger" type="Logger">
+  Custom logger with `debug` and `warn` methods. Defaults to console logger (dev mode only).
+</ParamField>
+
+<ParamField path="perPage" type="number" default={100}>
+  Repositories per page (1-100). Defaults to 100.
+</ParamField>
+
+<ParamField path="maxRetries" type="number" default={5}>
+  Maximum retry attempts for failed requests.
+</ParamField>
+
+<ParamField path="maxPages" type="number">
+  Maximum pages to fetch. Omit to fetch all starred repos.
+</ParamField>
+
+## Fetching Starred Repositories
+
+### fetchAllStarredRepos
+
+Fetch all starred repositories with automatic pagination.
+
+```typescript
+const result = await client.fetchAllStarredRepos({
+  signal: abortController.signal,
+  previousRepoIds: [123, 456, 789],
+  onProgress: (progress) => {
+    console.log(`Fetched ${progress.fetchedPages} pages, ${progress.totalReposSoFar} repos`);
+  }
+});
+
+console.log(`Found ${result.repos.length} starred repos`);
+console.log(`Removed ${result.removedRepoIds.length} repos`);
+```
+
+**Options:**
+
+<ParamField path="signal" type="AbortSignal">
+  AbortSignal for cancelling the fetch operation.
+</ParamField>
+
+<ParamField path="previousRepoIds" type="number[]">
+  Array of repo IDs from previous sync. Used to detect removed repos.
+</ParamField>
+
+<ParamField path="onProgress" type="(progress: FetchStarsProgress) => void">
+  Callback invoked after each page is fetched.
+</ParamField>
+
+**Returns:**
+
+<ResponseField name="repos" type="GitHubStarredRepo[]">
+  Array of all starred repositories
+</ResponseField>
+
+<ResponseField name="removedRepoIds" type="number[]">
+  IDs of repos that were in `previousRepoIds` but no longer starred
+</ResponseField>
+
+<ResponseField name="fetchedPages" type="number">
+  Total number of pages fetched
+</ResponseField>
+
+<ResponseField name="rateLimit" type="GitHubRateLimit">
+  Current GitHub API rate limit status from the last request
+</ResponseField>
+
+### GitHubStarredRepo Type
+
+```typescript
+type GitHubStarredRepo = {
+  id: number;                    // Unique repo ID
+  node_id: string;               // GraphQL node ID
+  name: string;                  // Repo name
+  full_name: string;             // Owner/repo format
+  private: boolean;              // Private repository flag
+  html_url: string;              // GitHub web URL
+  description: string | null;    // Repo description
+  stargazers_count: number;      // Number of stars
+  forks_count: number;           // Number of forks
+  language: string | null;       // Primary language
+  topics?: string[];             // Repository topics
+  updated_at: string;            // Last updated timestamp (ISO 8601)
+  owner: {
+    login: string;               // Owner username
+    avatar_url?: string;         // Avatar image URL
+  };
+};
+```
+
+### FetchStarsProgress Type
+
+```typescript
+type FetchStarsProgress = {
+  fetchedPages: number;       // Pages fetched so far
+  totalReposSoFar: number;    // Total repos accumulated
+  latestPageCount: number;    // Repos in the latest page
+};
+```
+
+### GitHubRateLimit Type
+
+```typescript
+type GitHubRateLimit = {
+  limit: number | null;      // Total requests allowed per hour
+  remaining: number | null;  // Requests remaining
+  resetAt: number | null;    // Timestamp when limit resets (milliseconds)
+};
+```
+
+## Fetching README Files
+
+### fetchReadmes
+
+Fetch README files for repositories with adaptive concurrency and intelligent caching.
+
+```typescript
+const previousSyncState = new Map([
+  [123, { checksum: "abc123", readmeEtag: '"etag"', readmeLastModified: "date" }],
+]);
+
+const result = await client.fetchReadmes(repos, {
+  signal: abortController.signal,
+  concurrency: 6,
+  minConcurrency: 4,
+  maxConcurrency: 20,
+  batchSize: 40,
+  previousSyncStateByRepoId: previousSyncState,
+  onProgress: (progress) => {
+    console.log(`${progress.completed}/${progress.total} READMEs fetched`);
+  },
+  onBatch: async (records, progress, stats) => {
+    // Save batch to database
+    await db.saveReadmes(records);
+  }
+});
+```
+
+**Options:**
+
+<ParamField path="signal" type="AbortSignal">
+  AbortSignal for cancelling the fetch operation.
+</ParamField>
+
+<ParamField path="concurrency" type="number" default={6}>
+  Initial concurrent requests. Auto-adjusts based on performance.
+</ParamField>
+
+<ParamField path="minConcurrency" type="number" default={4}>
+  Minimum concurrent requests during adaptive throttling.
+</ParamField>
+
+<ParamField path="maxConcurrency" type="number" default={20}>
+  Maximum concurrent requests during adaptive scaling.
+</ParamField>
+
+<ParamField path="batchSize" type="number" default={40}>
+  Number of records to buffer before calling `onBatch`.
+</ParamField>
+
+<ParamField path="previousSyncStateByRepoId" type="Map<number, SyncState>">
+  Map of repo ID to previous sync state for conditional requests (ETags/Last-Modified).
+
+  ```typescript
+  type SyncState = {
+    checksum: string | null;
+    readmeEtag: string | null;
+    readmeLastModified: string | null;
+  };
+  ```
+</ParamField>
+
+<ParamField path="onProgress" type="(progress: ReadmeFetchProgress) => void">
+  Callback invoked after each README is fetched.
+</ParamField>
+
+<ParamField path="onBatch" type="(records, progress, stats) => Promise<void> | void">
+  Callback invoked when batch buffer reaches `batchSize` or all READMEs are fetched.
+</ParamField>
+
+**Returns:**
+
+<ResponseField name="records" type="RepoReadmeRecord[]">
+  Array of README records for all repositories
+</ResponseField>
+
+<ResponseField name="missingCount" type="number">
+  Number of repos without a README file
+</ResponseField>
+
+<ResponseField name="failedCount" type="number">
+  Number of README fetches that failed
+</ResponseField>
+
+### RepoReadmeRecord Type
+
+```typescript
+type RepoReadmeRecord = {
+  repoId: number;                      // Repository ID
+  readmeUrl: string | null;            // HTML URL to README on GitHub
+  readmeText: string | null;           // Decoded README content (UTF-8)
+  readmeEtag: string | null;           // ETag header for caching
+  readmeLastModified: string | null;   // Last-Modified header
+  checksum: string;                    // SHA-256 hash of repo metadata + README
+  missingReadme: boolean;              // true if repo has no README
+  notModified: boolean;                // true if HTTP 304 (cached)
+};
+```
+
+### ReadmeFetchProgress Type
+
+```typescript
+type ReadmeFetchProgress = {
+  completed: number;    // READMEs fetched so far
+  total: number;        // Total READMEs to fetch
+  missingCount: number; // Repos without README
+  failedCount: number;  // Failed fetches
+};
+```
+
+### ReadmeFetchStats Type
+
+```typescript
+type ReadmeFetchStats = {
+  requested: number;       // Total READMEs requested
+  succeeded: number;       // Successful fetches (200/304)
+  missing: number;         // Repos with no README (404)
+  failed: number;          // Failed requests
+  retryCount: number;      // Total retry attempts
+  rateLimitHits: number;   // Times rate limited (429/403)
+  avgLatencyMs: number;    // Average request latency
+  p95LatencyMs: number;    // 95th percentile latency
+};
+```
+
+## Sync Planning
+
+### Building a Sync Plan
+
+Determine which repos need updating based on metadata changes.
+
+```typescript
+import { buildSyncPlan } from "@/sync/plan";
+import type { RepoSyncState } from "@/db/types";
+
+const localRepos: RepoSyncState[] = [
+  {
+    id: 123,
+    fullName: "owner/repo",
+    description: "Old description",
+    language: "TypeScript",
+    topics: ["react"],
+    updatedAt: "2024-01-01T00:00:00Z",
+    checksum: "abc123"
+  }
+];
+
+const remoteRepos: GitHubStarredRepo[] = [
+  // Fetched from GitHub
+];
+
+const plan = buildSyncPlan(localRepos, remoteRepos);
+
+console.log(`Remove ${plan.removedRepoIds.length} repos`);
+console.log(`Update ${plan.candidateRepoIds.length} repos`);
+```
+
+**Returns:**
+
+<ResponseField name="removedRepoIds" type="number[]">
+  IDs of repos in local database but not in remote (user unstarred)
+</ResponseField>
+
+<ResponseField name="candidateRepoIds" type="number[]">
+  IDs of repos that are new or have metadata changes requiring README refetch
+</ResponseField>
+
+### Metadata Change Detection
+
+A repo is marked for update if any of these changed:
+
+- `full_name` - Repository was renamed
+- `description` - Description updated
+- `language` - Primary language changed
+- `updated_at` - Repository updated
+- `topics` - Topics added/removed/reordered
+
+Repos without a checksum are always marked for update.
+
+```typescript
+function repoMetadataChanged(local: RepoSyncState, remote: GitHubStarredRepo): boolean {
+  return (
+    local.fullName !== remote.full_name ||
+    local.description !== remote.description ||
+    local.language !== remote.language ||
+    local.updatedAt !== remote.updated_at ||
+    !equalTopics(local.topics, remote.topics ?? [])
+  );
+}
+```
+
+## Checksum System
+
+### Canonical Checksum
+
+Generate a deterministic checksum from repo metadata and README content.
+
+```typescript
+import { canonicalChecksumInput, sha256Hex } from "@/github/checksum";
+
+const repo: GitHubStarredRepo = { /* ... */ };
+const readmeText = "# My Project\n\nDescription...";
+
+// Step 1: Hash the README
+const readmeSha256 = await sha256Hex(readmeText);
+
+// Step 2: Create canonical input string
+const checksumInput = canonicalChecksumInput(repo, readmeSha256);
+// Returns:
+// id:123
+// full_name:owner/repo
+// description:A cool project
+// language:TypeScript
+// topics:react,vite
+// updated_at:2024-01-01T00:00:00Z
+// readme_sha256:abc123...
+
+// Step 3: Hash the canonical input
+const checksum = await sha256Hex(checksumInput);
+```
+
+**Purpose:**
+- Detect any changes to repo metadata or README
+- Skip README refetch if checksum matches (HTTP 304)
+- Deterministic ordering (topics sorted alphabetically)
+
+### sha256Hex
+
+Compute SHA-256 hash of a string.
+
+```typescript
+const hash = await sha256Hex("content");
+// Returns: "ed7002b439e9ac845f22357d822bac1444730fbdb6016d3ec9432297b9ec9f73"
+```
+
+<ParamField path="input" type="string" required>
+  String to hash
+</ParamField>
+
+**Returns:** Lowercase hexadecimal SHA-256 hash
+
+### canonicalChecksumInput
+
+Create canonical string representation of repo and README for checksumming.
+
+```typescript
+const input = canonicalChecksumInput(repo, readmeSha256);
+```
+
+<ParamField path="repo" type="GitHubStarredRepo" required>
+  Repository metadata from GitHub
+</ParamField>
+
+<ParamField path="readmeSha256" type="string" required>
+  SHA-256 hash of the README text (use empty string hash for missing READMEs)
+</ParamField>
+
+**Returns:** Newline-separated key-value pairs with sorted topics
+
+## Retry and Rate Limiting
+
+### Automatic Retry
+
+The client automatically retries failed requests with exponential backoff:
+
+1. **Retry Conditions:**
+   - HTTP 429 (Too Many Requests)
+   - HTTP 403 with `x-ratelimit-remaining: 0`
+
+2. **Backoff Strategy:**
+   - Uses `Retry-After` header if present
+   - Falls back to `x-ratelimit-reset` timestamp
+   - Exponential backoff with jitter: `min(2^attempt * 1000, 30000) + random(0-300)ms`
+
+3. **Max Retries:**
+   - Configurable via `maxRetries` (default: 5)
+   - Throws error after max attempts exceeded
+
+### Adaptive Concurrency
+
+README fetching dynamically adjusts concurrency based on performance:
+
+**Scale Down (70% reduction) when:**
+- Rate limited (429/403 responses)
+- Error rate > 12%
+
+**Scale Up (+1 concurrent request) when:**
+- P95 latency < 900ms
+- Error rate < 3%
+
+**Window Size:** 24 requests per adjustment
+
+**Example:**
+```typescript
+// Starts at concurrency: 6
+// Rate limited → drops to 4 (70% of 6)
+// Performance improves → increases to 5
+// Performance excellent → increases to 6
+// Hit max concurrent limit (20) → stays at 20
+```
+
+### Conditional Requests
+
+Save bandwidth and quota using HTTP caching headers:
+
+```typescript
+const previousState = {
+  checksum: "abc123",
+  readmeEtag: '"33a64df551425fcc55e4d42a148795d9f25f89d4"',
+  readmeLastModified: "Wed, 21 Oct 2023 07:28:00 GMT"
+};
+
+// Automatically sends:
+// If-None-Match: "33a64df551425fcc55e4d42a148795d9f25f89d4"
+// If-Modified-Since: Wed, 21 Oct 2023 07:28:00 GMT
+
+// GitHub responds with:
+// - 304 Not Modified (no body, saves bandwidth)
+// - 200 OK with new content (README changed)
+```
+
+## Error Handling
+
+### Common Errors
+
+| Error | Cause | Solution |
+|-------|-------|----------|
+| `GitHub access token is required` | Empty or missing token | Provide valid token |
+| `GitHub authorization failed (401)` | Invalid token or insufficient scopes | Check token and scopes |
+| `GitHub request failed (status)` | Non-retryable HTTP error | Check GitHub status |
+| `perPage must be between 1 and 100` | Invalid pagination config | Use 1-100 |
+| `maxPages must be greater than 0` | Invalid max pages | Use positive number |
+| `Fetch API is not available` | Running in unsupported environment | Use modern browser/Node |
+
+### Abort Controller
+
+Cancel in-progress operations:
+
+```typescript
+const controller = new AbortController();
+
+const fetchPromise = client.fetchAllStarredRepos({
+  signal: controller.signal
+});
+
+// Cancel after 30 seconds
+setTimeout(() => controller.abort(), 30000);
+
+try {
+  await fetchPromise;
+} catch (error) {
+  if (controller.signal.aborted) {
+    console.log("Fetch cancelled by user");
+  }
+}
+```
+
+## Complete Sync Example
+
+```typescript
+import { createGitHubApiClient } from "@/github/client";
+import { buildSyncPlan } from "@/sync/plan";
+import { sha256Hex, canonicalChecksumInput } from "@/github/checksum";
+
+async function syncStars(accessToken: string) {
+  const client = createGitHubApiClient({ accessToken });
+  
+  // 1. Fetch all starred repos
+  const { repos, removedRepoIds, rateLimit } = await client.fetchAllStarredRepos({
+    previousRepoIds: await db.getAllRepoIds(),
+    onProgress: (p) => console.log(`Page ${p.fetchedPages}: ${p.totalReposSoFar} repos`)
+  });
+  
+  console.log(`Fetched ${repos.length} stars, ${removedRepoIds.length} removed`);
+  console.log(`Rate limit: ${rateLimit.remaining}/${rateLimit.limit}`);
+  
+  // 2. Build sync plan
+  const localRepos = await db.getAllRepos();
+  const { candidateRepoIds } = buildSyncPlan(localRepos, repos);
+  
+  console.log(`Need to update ${candidateRepoIds.length} repos`);
+  
+  // 3. Fetch READMEs for changed repos
+  const candidateRepos = repos.filter(r => candidateRepoIds.includes(r.id));
+  const previousSyncState = new Map(
+    localRepos.map(r => [r.id, {
+      checksum: r.checksum,
+      readmeEtag: r.readmeEtag,
+      readmeLastModified: r.readmeLastModified
+    }])
+  );
+  
+  const { records, missingCount, failedCount } = await client.fetchReadmes(
+    candidateRepos,
+    {
+      previousSyncStateByRepoId: previousSyncState,
+      onProgress: (p) => console.log(`${p.completed}/${p.total} READMEs`),
+      onBatch: async (batch) => {
+        await db.upsertReadmes(batch);
+      }
+    }
+  );
+  
+  // 4. Update database
+  await db.removeRepos(removedRepoIds);
+  await db.upsertRepos(repos);
+  
+  console.log(`Sync complete: ${records.length} READMEs, ${missingCount} missing, ${failedCount} failed`);
+}
+```
+
+## Type Reference
+
+### Logger Interface
+
+```typescript
+type Logger = {
+  debug: (message: string, meta?: Record<string, unknown>) => void;
+  warn: (message: string, meta?: Record<string, unknown>) => void;
+};
+```
+
+### RepoSyncState (Database Model)
+
+```typescript
+type RepoSyncState = {
+  id: number;
+  fullName: string;
+  description: string | null;
+  language: string | null;
+  topics: string[];
+  updatedAt: string;
+  checksum: string | null;
+};
+```
+
+### SyncPlan
+
+```typescript
+type SyncPlan = {
+  removedRepoIds: number[];     // Repos to delete from local DB
+  candidateRepoIds: number[];   // Repos to fetch/update READMEs
+};
+```

@@ -1,0 +1,442 @@
+---
+title: Ollama Client
+description: Local embedding and LLM inference via Ollama
+---
+
+## Overview
+
+The Ollama client provides local embedding generation and LLM chat capabilities through the Ollama server. It supports both the `/api/embed` (batch) and `/api/embeddings` (single) endpoints with automatic fallback detection.
+
+## OllamaEmbeddingClient
+
+### Constructor
+
+From `src/embeddings/ollamaClient.ts:97-116`:
+
+```typescript
+import { OllamaEmbeddingClient } from './embeddings/ollamaClient';
+
+const client = new OllamaEmbeddingClient({
+  baseUrl: 'http://localhost:11434',
+  model: 'nomic-embed-text',
+  timeoutMs: 30000,
+});
+```
+
+<ParamField path="baseUrl" type="string" required>
+  Ollama server URL. **Must use localhost, 127.0.0.1, or [::1]** for security.
+</ParamField>
+
+<ParamField path="model" type="string" required>
+  Embedding model name (e.g., `"nomic-embed-text"`, `"mxbai-embed-large"`)
+</ParamField>
+
+<ParamField path="timeoutMs" type="number" required>
+  Request timeout in milliseconds. Minimum: 1000ms.
+</ParamField>
+
+**Throws:**
+- `Error("Ollama endpoint must use localhost / 127.0.0.1 / [::1]")` - Non-local URL
+- `Error("Ollama embedding model is required")` - Empty model name
+
+## Embedding Methods
+
+### embedBatch
+
+From `src/embeddings/ollamaClient.ts:189-242`:
+
+```typescript
+const texts = [
+  'First document content',
+  'Second document content',
+  'Third document content',
+];
+
+const embeddings = await client.embedBatch(texts);
+// Float32Array[] - one vector per input text
+
+console.log(embeddings.length); // 3
+console.log(embeddings[0]); // Float32Array [0.123, -0.456, ...]
+```
+
+<ParamField path="texts" type="string[]" required>
+  Array of text strings to embed. Returns empty array if input is empty.
+</ParamField>
+
+**Returns:** `Promise<Float32Array[]>`
+
+**Behavior:**
+- Automatically detects endpoint (`/api/embed` vs `/api/embeddings`)
+- `/api/embed`: Batches all texts in single request
+- `/api/embeddings`: Sends one request per text sequentially
+- Validates response vector count matches input count
+
+**Throws:**
+- `Error("Ollama request timed out after Xms")`
+- `Error("Ollama /api/embed failed: <reason>")`
+- `Error("Ollama /api/embeddings failed: <reason>")`
+- `Error("invalid embedding vector format")`
+- `Error("embedding vector contains non-numeric values")`
+
+## Health & Probing
+
+### healthCheck
+
+From `src/embeddings/ollamaClient.ts:167-176`:
+
+```typescript
+const availableModels = await client.healthCheck();
+// ['nomic-embed-text', 'llama3.1:8b', 'mxbai-embed-large']
+```
+
+**Returns:** `Promise<string[]>` - List of available model names
+
+Queries `/api/tags` and parses the `models` array.
+
+**Throws:**
+- `Error("Ollama health check failed: <reason>")`
+
+### probeRuntime
+
+From `src/embeddings/ollamaClient.ts:178-187`:
+
+```typescript
+const runtime = await client.probeRuntime();
+// {
+//   baseUrl: 'http://localhost:11434',
+//   model: 'nomic-embed-text',
+//   endpoint: 'embed',
+//   availableModels: ['nomic-embed-text', ...]
+// }
+```
+
+**Returns:** `Promise<OllamaEmbeddingRuntimeInfo>`
+
+<ParamField path="baseUrl" type="string">
+  Configured base URL
+</ParamField>
+
+<ParamField path="model" type="string">
+  Configured model name
+</ParamField>
+
+<ParamField path="endpoint" type="'embed' | 'embeddings'">
+  Detected endpoint type (batch vs single)
+</ParamField>
+
+<ParamField path="availableModels" type="string[]">
+  Models discovered via `/api/tags`
+</ParamField>
+
+Performs both health check and endpoint detection.
+
+## Endpoint Detection
+
+From `src/embeddings/ollamaClient.ts:136-165`:
+
+The client automatically detects which endpoint to use:
+
+1. **First request**: Probes `/api/embed` with `{"model": "...", "input": ["probe"]}`
+2. **HTTP 404 or 405**: Falls back to `/api/embeddings`
+3. **HTTP 200**: Uses `/api/embed` (batch endpoint)
+4. **Other errors**: Throws with reason
+
+Endpoint is cached after first detection.
+
+### /api/embed (Batch)
+
+```json
+{
+  "model": "nomic-embed-text",
+  "input": ["text1", "text2", "text3"]
+}
+```
+
+Response:
+```json
+{
+  "embeddings": [
+    [0.1, 0.2, 0.3],
+    [0.4, 0.5, 0.6],
+    [0.7, 0.8, 0.9]
+  ]
+}
+```
+
+### /api/embeddings (Single)
+
+```json
+{
+  "model": "nomic-embed-text",
+  "prompt": "single text"
+}
+```
+
+Response:
+```json
+{
+  "embedding": [0.1, 0.2, 0.3]
+}
+```
+
+## Ollama LLM Provider
+
+### Provider Definition
+
+From `src/llm/providers.ts:163-170`:
+
+```typescript
+{
+  id: "ollama",
+  label: "Local (Ollama)",
+  kind: "local",
+  defaultBaseUrl: "http://localhost:11434",
+  defaultModel: "llama3.1:8b",
+  requiresApiKey: false,
+}
+```
+
+### Chat Streaming
+
+From `src/llm/providers.ts:214-235`:
+
+```typescript
+import { getProviderById } from './llm/providers';
+import type { LLMProviderConfig, LLMStreamRequest } from './llm/types';
+
+const provider = getProviderById('ollama');
+
+const config: LLMProviderConfig = {
+  baseUrl: 'http://localhost:11434',
+  model: 'llama3.1:8b',
+};
+
+const request: LLMStreamRequest = {
+  prompt: 'Explain vector embeddings',
+  contextSnippets: ['Vector embeddings are...', 'Semantic search uses...'],
+  signal: new AbortController().signal,
+  onToken: (token) => process.stdout.write(token),
+};
+
+await provider.stream(config, request);
+```
+
+**Endpoint:** `POST /api/chat`
+
+**Request Format:**
+```json
+{
+  "model": "llama3.1:8b",
+  "stream": true,
+  "messages": [
+    {
+      "role": "system",
+      "content": "You are a recommendation assistant..."
+    },
+    {
+      "role": "user",
+      "content": "Explain vector embeddings\n\nContext 1:\nVector embeddings are..."
+    }
+  ]
+}
+```
+
+**Response Format:** JSON Lines (NDJSON)
+
+From `src/llm/providers.ts:82-127`:
+
+```json
+{"message":{"content":"Vector"},"done":false}
+{"message":{"content":" embeddings"},"done":false}
+{"message":{"content":" are"},"done":false}
+{"done":true}
+```
+
+The stream parser extracts:
+- `message.content` - Token text
+- `response` - Alternative token field
+- `done` - End of stream flag
+
+## Usage Examples
+
+### Basic Embedding
+
+From test: `src/embeddings/ollamaClient.test.ts:20-73`:
+
+```typescript
+const client = new OllamaEmbeddingClient({
+  baseUrl: 'http://localhost:11434',
+  model: 'nomic-embed-text',
+  timeoutMs: 10000,
+});
+
+// Verify connection
+const runtime = await client.probeRuntime();
+console.log(`Using ${runtime.endpoint} endpoint`);
+console.log(`Available models: ${runtime.availableModels.join(', ')}`);
+
+// Generate embeddings
+const vectors = await client.embedBatch(['hello', 'world']);
+console.log(`Generated ${vectors.length} embeddings`);
+console.log(`Dimension: ${vectors[0].length}`);
+```
+
+### Connection Testing
+
+From `src/pages/UsagePage.tsx:1161-1181`:
+
+```typescript
+import { OllamaEmbeddingClient } from './embeddings/ollamaClient';
+
+async function testOllamaConnection(
+  baseUrl: string,
+  model: string,
+): Promise<string> {
+  try {
+    const client = new OllamaEmbeddingClient({
+      baseUrl: baseUrl.trim() || 'http://localhost:11434',
+      model: model.trim() || 'nomic-embed-text',
+      timeoutMs: 30000,
+    });
+
+    const runtime = await client.probeRuntime();
+    return `Connected (${runtime.endpoint}) · model ${runtime.model} · ${runtime.availableModels.length} models detected`;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (message.toLowerCase().includes('localhost')) {
+      return 'Ollama URL must be localhost, 127.0.0.1, or [::1].';
+    }
+    return message;
+  }
+}
+```
+
+### Batch Processing with Timeout
+
+```typescript
+const client = new OllamaEmbeddingClient({
+  baseUrl: 'http://127.0.0.1:11434',
+  model: 'mxbai-embed-large',
+  timeoutMs: 60000, // 60 second timeout for large batches
+});
+
+const chunks = [
+  'Document chunk 1...',
+  'Document chunk 2...',
+  // ... hundreds of chunks
+];
+
+const embeddings = await client.embedBatch(chunks);
+
+// Store in database
+for (let i = 0; i < embeddings.length; i++) {
+  await db.insert({
+    text: chunks[i],
+    embedding: Array.from(embeddings[i]),
+  });
+}
+```
+
+## Type Definitions
+
+### OllamaEmbeddingRuntimeInfo
+
+From `src/embeddings/ollamaClient.ts:3-8`:
+
+```typescript
+type OllamaEmbeddingRuntimeInfo = {
+  baseUrl: string;
+  model: string;
+  endpoint: OllamaEmbeddingEndpoint;
+  availableModels: string[];
+};
+```
+
+### OllamaEmbeddingEndpoint
+
+```typescript
+type OllamaEmbeddingEndpoint = "embed" | "embeddings";
+```
+
+## Security Constraints
+
+From `src/embeddings/ollamaClient.ts:14-18`:
+
+```typescript
+const LOCAL_ENDPOINT_PATTERN = /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(?::\d+)?$/i;
+```
+
+The client **only accepts** localhost URLs:
+- `http://localhost:11434`
+- `http://127.0.0.1:11434`
+- `http://[::1]:11434`
+- `https://localhost:8443`
+
+This prevents accidental exposure to remote servers.
+
+## Error Handling
+
+### Timeout Errors
+
+From `src/embeddings/ollamaClient.ts:118-133`:
+
+```typescript
+try {
+  const embeddings = await client.embedBatch(texts);
+} catch (error) {
+  if (error instanceof Error && error.message.includes('timed out')) {
+    console.error('Ollama request exceeded timeout');
+    // Retry with larger timeout or smaller batch
+  }
+}
+```
+
+### Error Message Extraction
+
+From `src/embeddings/ollamaClient.ts:83-95`:
+
+The client parses JSON error responses:
+
+```json
+{"error": "model not found"}
+```
+
+or
+
+```json
+{"message": "invalid request"}
+```
+
+Falls back to HTTP status if parsing fails:
+```
+404 Not Found
+```
+
+## Best Practices
+
+1. **Always use localhost URLs** for security
+2. **Set appropriate timeouts** based on batch size
+3. **Call probeRuntime()** before processing to verify connection
+4. **Handle both endpoint types** - client does this automatically
+5. **Monitor available models** via healthCheck for debugging
+6. **Use Float32Array directly** - already optimized for storage
+7. **Batch when possible** - `/api/embed` is more efficient than individual requests
+
+## Common Models
+
+**Embedding Models:**
+- `nomic-embed-text` - General purpose embeddings
+- `mxbai-embed-large` - Higher quality, slower
+- `all-minilm` - Lightweight embeddings
+
+**Chat Models:**
+- `llama3.1:8b` - Balanced performance
+- `llama3.2:3b` - Faster, lower memory
+- `mistral:7b` - Alternative architecture
+- `qwen2.5:7b` - Multilingual support
+
+Install models via:
+```bash
+ollama pull nomic-embed-text
+ollama pull llama3.1:8b
+```

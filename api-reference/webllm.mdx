@@ -1,0 +1,426 @@
+---
+title: WebLLM Provider
+description: In-browser LLM inference using WebGPU and MLC
+---
+
+## Overview
+
+The WebLLM provider enables local LLM inference directly in the browser using WebGPU acceleration through the MLC engine. Models are downloaded and cached locally, providing privacy-focused chat capabilities without server dependencies.
+
+## Architecture
+
+### WebLLMEngineManager
+
+Singleton manager that handles model initialization, loading, and inference streaming.
+
+```typescript
+import { getWebLLMEngineManager } from './llm/webllm/engine';
+
+const manager = getWebLLMEngineManager();
+```
+
+## Configuration
+
+### Provider Definition
+
+From `src/llm/providers.ts:180-186`:
+
+```typescript
+{
+  id: "webllm",
+  label: "Local (Browser WebLLM)",
+  kind: "local",
+  defaultBaseUrl: "",
+  defaultModel: "Llama-3.2-1B-Instruct-q4f16_1-MLC",
+  requiresApiKey: false,
+}
+```
+
+<ParamField path="id" type="string" required>
+  Provider identifier: `"webllm"`
+</ParamField>
+
+<ParamField path="kind" type="string">
+  Provider type: `"local"` (runs in browser)
+</ParamField>
+
+<ParamField path="defaultModel" type="string">
+  Default model: `"Llama-3.2-1B-Instruct-q4f16_1-MLC"`
+</ParamField>
+
+<ParamField path="requiresApiKey" type="boolean">
+  API key required: `false`
+</ParamField>
+
+## Model Catalog
+
+### Available Models
+
+From `src/llm/webllm/modelCatalog.ts:12-56`:
+
+<ParamField path="Llama-3.2-1B-Instruct-q4f16_1-MLC" type="object">
+  **Tier:** balanced  
+  **Size:** ~700 MB  
+  **Notes:** Primary default for strong desktops
+</ParamField>
+
+<ParamField path="SmolLM2-360M-Instruct-q4f16_1-MLC" type="object">
+  **Tier:** ultra-low  
+  **Size:** ~250 MB  
+  **Notes:** Mobile and weak-device fallback
+</ParamField>
+
+<ParamField path="Qwen2.5-1.5B-Instruct-q4f16_1-MLC" type="object">
+  **Tier:** quality  
+  **Size:** ~1100 MB  
+  **Notes:** Strong for technical summaries
+</ParamField>
+
+<ParamField path="Gemma-2-2B-Instruct-q4f16_1-MLC" type="object">
+  **Tier:** quality  
+  **Size:** ~1400 MB  
+  **Notes:** Polished README summarization
+</ParamField>
+
+<ParamField path="Llama-3.1-3B-Instruct-q4f16_1-MLC" type="object">
+  **Tier:** quality  
+  **Size:** ~1900 MB  
+  **Notes:** Fallback substitute when Hermes is unavailable
+</ParamField>
+
+### Model Selection Functions
+
+```typescript
+import {
+  getWebLLMSelectableModels,
+  getWebLLMModelProfile,
+  isWebLLMModelIdSupported,
+} from './llm/webllm/modelCatalog';
+
+// Get all available models
+const models = getWebLLMSelectableModels();
+// WebLLMModelProfile[]
+
+// Get specific model info
+const profile = getWebLLMModelProfile('Llama-3.2-1B-Instruct-q4f16_1-MLC');
+// { id, label, tier, approxDownloadMB, notes }
+
+// Check if model is supported
+const supported = isWebLLMModelIdSupported('custom-model');
+// boolean
+```
+
+## Capability Detection
+
+### WebLLMCapability
+
+From `src/llm/webllm/capability.ts:8-14`:
+
+<ParamField path="isMobile" type="boolean">
+  Whether the device is mobile
+</ParamField>
+
+<ParamField path="hasWebGPU" type="boolean">
+  Whether WebGPU is available in the browser
+</ParamField>
+
+<ParamField path="hardwareConcurrency" type="number">
+  Number of logical CPU cores
+</ParamField>
+
+<ParamField path="deviceMemoryGB" type="number | null">
+  Available device memory in GB (null if unavailable)
+</ParamField>
+
+<ParamField path="perfScore" type="number | null">
+  Performance benchmark score (null if probe failed)
+</ParamField>
+
+### Automatic Model Recommendation
+
+```typescript
+import { recommendWebLLMModel } from './llm/webllm/capability';
+
+const recommendation = await recommendWebLLMModel();
+// {
+//   modelId: string,
+//   reason: 'mobile' | 'no-webgpu' | 'strong-desktop' | 'weak-desktop' | 'probe-failed',
+//   score: number | null,
+//   threshold: number | null,
+//   capability: WebLLMCapability | null
+// }
+```
+
+**Recommendation Logic:**
+
+- **Mobile devices**: `SmolLM2-360M-Instruct-q4f16_1-MLC` (250 MB)
+- **No WebGPU**: `SmolLM2-360M-Instruct-q4f16_1-MLC` (250 MB)
+- **Strong desktop** (score ≥ 5): `Llama-3.2-1B-Instruct-q4f16_1-MLC` (700 MB)
+- **Weak desktop** (score < 5): `SmolLM2-360M-Instruct-q4f16_1-MLC` (250 MB)
+
+The scoring algorithm evaluates:
+- CPU cores (6+, 8+, 10+ add points)
+- Device memory (6GB+, 8GB+, 16GB+ add points)
+- Performance benchmark (800+, 1100+, 1600+ add points)
+
+## Engine Initialization
+
+### ensureReady
+
+From `src/llm/webllm/engine.ts:48-102`:
+
+```typescript
+import { getWebLLMEngineManager } from './llm/webllm/engine';
+
+const manager = getWebLLMEngineManager();
+
+await manager.ensureReady(modelId, {
+  allowDownload: true,
+  onProgress: (progress, text) => {
+    console.log(`${Math.round(progress * 100)}%: ${text}`);
+  },
+});
+```
+
+<ParamField path="modelId" type="string" required>
+  MLC model ID (e.g., `"Llama-3.2-1B-Instruct-q4f16_1-MLC"`)
+</ParamField>
+
+<ParamField path="options.allowDownload" type="boolean" required>
+  Whether to allow model download. **Must be true** for initialization.
+</ParamField>
+
+<ParamField path="options.onProgress" type="(progress: number, text: string) => void">
+  Progress callback. `progress` is 0-1, `text` is status message.
+</ParamField>
+
+**Throws:**
+- `WebLLMProviderError("WEBLLM_UNSUPPORTED")` - WebGPU not available
+- `WebLLMProviderError("WEBLLM_DOWNLOAD_REQUIRED")` - User consent needed
+- `WebLLMProviderError("WEBLLM_INIT_FAILED")` - Model loading failed
+
+## Streaming Inference
+
+### stream
+
+From `src/llm/webllm/engine.ts:104-143`:
+
+```typescript
+const messages = [
+  { role: 'system', content: 'You are a helpful assistant.' },
+  { role: 'user', content: 'Explain WebGPU.' },
+];
+
+const controller = new AbortController();
+
+await manager.stream(
+  modelId,
+  messages,
+  controller.signal,
+  (token) => {
+    process.stdout.write(token);
+  },
+);
+```
+
+<ParamField path="modelId" type="string" required>
+  Model ID matching the currently loaded model
+</ParamField>
+
+<ParamField path="messages" type="WebLLMMessage[]" required>
+  Chat messages with `role` (system/user/assistant) and `content`
+</ParamField>
+
+<ParamField path="signal" type="AbortSignal" required>
+  Abort signal to cancel generation
+</ParamField>
+
+<ParamField path="onToken" type="(token: string) => void" required>
+  Callback invoked for each generated token
+</ParamField>
+
+**Stream Parameters** (hardcoded in engine.ts:122-124):
+- `temperature: 0.2`
+- `max_tokens: 700`
+- `stream: true`
+
+**Throws:**
+- `WebLLMProviderError("WEBLLM_INIT_FAILED")` - Engine not initialized
+- `WebLLMProviderError("WEBLLM_STREAM_FAILED")` - Generation failed
+- `DOMException("AbortError")` - User cancelled
+
+## Provider Integration
+
+### Using via getProviderById
+
+From `src/llm/providers.ts:260-281`:
+
+```typescript
+import { getProviderById } from './llm/providers';
+import type { LLMProviderConfig, LLMStreamRequest } from './llm/types';
+
+const provider = getProviderById('webllm');
+
+const config: LLMProviderConfig = {
+  baseUrl: '',
+  model: 'Llama-3.2-1B-Instruct-q4f16_1-MLC',
+  allowModelDownload: true,
+};
+
+const request: LLMStreamRequest = {
+  prompt: 'What is semantic search?',
+  contextSnippets: ['Context 1: ...', 'Context 2: ...'],
+  signal: new AbortController().signal,
+  onToken: (token) => console.log(token),
+  onInitProgress: (progress, text) => {
+    console.log(`Init: ${Math.round(progress * 100)}% - ${text}`);
+  },
+};
+
+await provider.stream(config, request);
+```
+
+## Error Handling
+
+### WebLLMProviderError
+
+From `src/llm/webllm/engine.ts:8-22`:
+
+```typescript
+import { WebLLMProviderError } from './llm/webllm/engine';
+
+try {
+  await manager.ensureReady(modelId, { allowDownload: false });
+} catch (error) {
+  if (error instanceof WebLLMProviderError) {
+    console.error(error.code); // "WEBLLM_DOWNLOAD_REQUIRED"
+    console.error(error.message);
+  }
+}
+```
+
+**Error Codes:**
+
+<ParamField path="WEBLLM_UNSUPPORTED" type="string">
+  WebGPU not available in browser
+</ParamField>
+
+<ParamField path="WEBLLM_DOWNLOAD_REQUIRED" type="string">
+  Model download requires user consent
+</ParamField>
+
+<ParamField path="WEBLLM_INIT_FAILED" type="string">
+  Model initialization failed
+</ParamField>
+
+<ParamField path="WEBLLM_STREAM_FAILED" type="string">
+  Inference streaming failed
+</ParamField>
+
+### Format Provider Error
+
+From `src/llm/providers.ts:295-319`:
+
+```typescript
+import { formatProviderError } from './llm/providers';
+
+try {
+  await provider.stream(config, request);
+} catch (error) {
+  const userMessage = formatProviderError(error, 'local');
+  console.error(userMessage);
+  // "WebLLM model download requires explicit consent."
+}
+```
+
+## Feature Flag
+
+```typescript
+import { isWebLLMEnabled } from './llm/providers';
+
+if (isWebLLMEnabled()) {
+  // VITE_WEBLLM_ENABLED=1 or VITE_WEBLLM_ENABLED=true
+}
+```
+
+Set environment variable:
+```bash
+VITE_WEBLLM_ENABLED=1
+```
+
+## Cache Management
+
+### Unload Model
+
+```typescript
+await manager.unload();
+// Releases engine and clears active model
+```
+
+### Clear Runtime Caches
+
+From `src/pages/UsagePage.tsx:552-566`:
+
+```typescript
+async function clearWebLLMRuntimeCaches(): Promise<void> {
+  if (!('caches' in globalThis)) {
+    return;
+  }
+
+  const keys = await caches.keys();
+  await Promise.all(
+    keys
+      .filter((key) => {
+        const lower = key.toLowerCase();
+        return lower.includes('webllm') || lower.includes('mlc') || lower.includes('model');
+      })
+      .map((key) => caches.delete(key)),
+  );
+}
+```
+
+## Type Definitions
+
+### WebLLMModelProfile
+
+```typescript
+type WebLLMModelProfile = {
+  id: string;
+  label: string;
+  tier: 'ultra-low' | 'balanced' | 'quality';
+  approxDownloadMB: number;
+  notes?: string;
+  experimental?: boolean;
+};
+```
+
+### WebLLMMessage
+
+```typescript
+type WebLLMMessage = {
+  role: 'system' | 'user' | 'assistant';
+  content: string;
+};
+```
+
+### WebLLMRecommendation
+
+```typescript
+type WebLLMRecommendation = {
+  modelId: string;
+  reason: 'mobile' | 'no-webgpu' | 'strong-desktop' | 'weak-desktop' | 'probe-failed';
+  score: number | null;
+  threshold: number | null;
+  capability: WebLLMCapability | null;
+};
+```
+
+## Best Practices
+
+1. **Always check WebGPU availability** before initializing
+2. **Request download consent** from users (models are large)
+3. **Use model recommendations** based on device capabilities
+4. **Handle AbortError** for user cancellations
+5. **Cache models** persist across sessions (stored in Cache API)
+6. **Monitor progress** during multi-GB downloads
+7. **Fallback to smaller models** on weak hardware

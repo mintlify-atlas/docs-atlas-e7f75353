@@ -1,0 +1,109 @@
+---
+title: Introduction
+description: Find your starred repos by memory, not by name with GitStarRecall's local-first semantic search
+---
+
+<img
+  className="block dark:hidden"
+  src="/images/hero-light.svg"
+  alt="GitStarRecall Hero Light"
+/>
+<img
+  className="hidden dark:block"
+  src="/images/hero-dark.svg"
+  alt="GitStarRecall Hero Dark"
+/>
+
+## Find starred repos by memory, not by name
+
+GitStarRecall is a local-first web app that turns your GitHub stars into a searchable memory system. Ask it like you'd ask a human:
+
+- "I starred a GraphQL security testing repo months ago, what was it?"
+- "Show me TypeScript auth projects with clean architecture vibes."
+- "Recommend the best-fit repos from my stars for my use case."
+
+<Note>
+  This project exists because starred repos are great until your brain says, "I know what it does, but not what it is called."
+</Note>
+
+## Why GitStarRecall?
+
+People star a lot of useful repos. Later, they remember functionality, not names. GitHub search is good, but semantic memory search is better for this exact problem.
+
+<CardGroup cols={2}>
+  <Card title="Privacy-First Storage" icon="shield-check">
+    SQLite WASM + OPFS keeps everything on-device. Your data stays in the browser unless you explicitly opt into remote LLM usage.
+  </Card>
+  <Card title="Security-Aligned" icon="lock">
+    OAuth PKCE flow, token isolation, strict CSP, and explicit LLM consent controls protect your data.
+  </Card>
+  <Card title="Incremental Sync" icon="arrows-rotate">
+    Checksum-based diff sync handles 1k+ stars efficiently without full re-indexing.
+  </Card>
+  <Card title="Sessioned Recall" icon="messages">
+    Each query becomes a chat session, so you can refine and revisit ideas over time.
+  </Card>
+</CardGroup>
+
+## How It Works
+
+GitStarRecall builds a local semantic index of your starred repositories:
+
+<Steps>
+  <Step title="Fetch Your Stars">
+    Syncs your starred repositories including private stars (if token scope allows). Manual sync via `Fetch Stars` button gives you control.
+  </Step>
+  <Step title="Pull README Content">
+    Fetches README content and metadata from each repository with adaptive batched ingestion pipeline.
+  </Step>
+  <Step title="Generate Embeddings Locally">
+    Chunks and embeds content locally using browser workers with WebGPU acceleration (fallback to WASM). Optional Ollama backend for faster processing.
+  </Step>
+  <Step title="Search in Natural Language">
+    Query your stars using natural language. Vector search runs entirely on local embeddings.
+  </Step>
+  <Step title="Get LLM Answers (Optional)">
+    Optionally generate answers from top matches using browser WebLLM, local Ollama/LM Studio, or remote OpenAI-compatible providers.
+  </Step>
+</Steps>
+
+## Core Principles
+
+- **Local-first by default** - Data stays in browser unless you opt into remote providers
+- **Security before convenience** - OAuth PKCE, CSP hardening, and threat-model-driven design
+- **Explainability over magic** - Clear diagnostics and transparent provider selection
+- **Practical performance** - Optimized for real star counts (1k+ repos)
+
+## What Stays Local vs. Remote
+
+<Info>
+  By default, **everything stays local**. Remote LLM usage is opt-in only.
+</Info>
+
+### Local by Default
+- GitHub star metadata
+- README content
+- Chunks and embeddings
+- Chat sessions and message history
+- Vector search results
+
+### Remote (Opt-in Only)
+- Prompt context sent to remote LLM provider when you enable it
+- OAuth token exchange through backend endpoint (keeps client secret secure)
+
+## Quick Links
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Get from install to first search in under 5 minutes
+  </Card>
+  <Card title="Authentication" icon="key" href="/authentication">
+    Set up OAuth or Personal Access Token authentication
+  </Card>
+  <Card title="Core Features" icon="book-open" href="/features/semantic-search">
+    Explore semantic search, chat sessions, and local LLM capabilities
+  </Card>
+  <Card title="Architecture" icon="diagram-project" href="/advanced/architecture">
+    Deep dive into local-first architecture and security model
+  </Card>
+</CardGroup>

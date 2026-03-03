@@ -1,0 +1,361 @@
+---
+title: Chat Sessions
+description: Persistent conversations about your search results with context retention
+---
+
+Chat sessions let you have interactive conversations about your search results. Ask questions, get clarifications, and explore repositories through natural dialogue.
+
+## Overview
+
+Each search creates a persistent chat session that maintains context across multiple questions and answers.
+
+### Session Lifecycle
+
+<Steps>
+  <Step title="Search Creation">
+    Performing a semantic search automatically creates a new chat session
+  </Step>
+  
+  <Step title="Context Loading">
+    Top search results (up to 8) are loaded as context for the LLM
+  </Step>
+  
+  <Step title="Interactive Chat">
+    Ask questions and receive responses grounded in your search results
+  </Step>
+  
+  <Step title="Persistence">
+    All messages are saved locally and can be restored from history
+  </Step>
+</Steps>
+
+## Session Storage
+
+Chat sessions are stored in SQLite with automatic backups:
+
+```typescript Session Schema
+CREATE TABLE chat_sessions (
+  id TEXT NOT NULL PRIMARY KEY,
+  query TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE chat_messages (
+  id TEXT NOT NULL PRIMARY KEY,
+  session_id TEXT NOT NULL,
+  role TEXT NOT NULL CHECK (role IN ('user','assistant','system')),
+  content TEXT NOT NULL,
+  sequence INTEGER NOT NULL,
+  created_at INTEGER NOT NULL,
+  FOREIGN KEY (session_id) REFERENCES chat_sessions(id) ON DELETE CASCADE
+);
+```
+
+<Info>
+  Sessions are backed up to localStorage for recovery after browser data clearing.
+</Info>
+
+### Message Ordering
+
+Messages are ordered using a combination of `created_at` timestamp and `sequence` number:
+
+```typescript Message Sorting
+function sortChatMessages(messages: ChatMessageRecord[]): ChatMessageRecord[] {
+  return messages.sort((a, b) => {
+    const timeDiff = a.createdAt - b.createdAt;
+    if (timeDiff !== 0) return timeDiff;
+    return a.sequence - b.sequence;
+  });
+}
+```
+
+## Context Management
+
+Chat responses are grounded in search results to prevent hallucination:
+
+### Context Construction
+
+```typescript Building Context
+function buildContextBlock(snippets: string[]): string {
+  return snippets
+    .slice(0, 8)  // Top 8 results
+    .map((snippet, index) => `Context ${index + 1}:\n${snippet}`)
+    .join("\n\n");
+}
+
+function buildMessages(prompt: string, snippets: string[]): Message[] {
+  return [
+    {
+      role: "system",
+      content: "You are a recommendation assistant for GitHub starred repositories. Use only provided context and be concise."
+    },
+    {
+      role: "user",
+      content: `${prompt}\n\n${buildContextBlock(snippets)}`
+    }
+  ];
+}
+```
+
+<Warning>
+  LLMs can only reference repositories from your current search results. Perform a new search to change the context.
+</Warning>
+
+## Message Types
+
+Chat sessions support three message roles:
+
+<AccordionGroup>
+  <Accordion title="User Messages" icon="user">
+    Questions and prompts from you
+    
+    - Displayed with right alignment
+    - Plain text rendering
+    - Submitted via Enter key or send button
+  </Accordion>
+
+  <Accordion title="Assistant Messages" icon="robot">
+    Responses from the LLM
+    
+    - Displayed with left alignment
+    - Markdown rendering with syntax highlighting
+    - Streamed token-by-token as they're generated
+  </Accordion>
+
+  <Accordion title="System Messages" icon="gear">
+    Internal context instructions (not displayed)
+    
+    - Contains repository context
+    - Defines assistant behavior
+    - Not shown in the UI
+  </Accordion>
+</AccordionGroup>
+
+## Streaming Responses
+
+Assistant responses stream in real-time as the LLM generates tokens:
+
+```typescript Streaming Implementation
+async function stream(
+  config: LLMProviderConfig,
+  request: LLMStreamRequest
+): Promise<void> {
+  const response = await fetch(`${baseUrl}/v1/chat/completions`, {
+    method: "POST",
+    signal: request.signal,
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${config.apiKey}`
+    },
+    body: JSON.stringify({
+      model: config.model,
+      stream: true,
+      messages: buildMessages(request.prompt, request.contextSnippets)
+    })
+  });
+
+  await parseSseStream(response, request.onToken);
+}
+```
+
+### Cancellation
+
+Streaming can be cancelled mid-generation:
+
+- Click the **Cancel** button
+- Uses AbortController to terminate the request
+- Partial response is preserved in the session
+
+## Session History
+
+Access previous chat sessions from the history panel:
+
+<CardGroup cols={2}>
+  <Card title="Session List" icon="clock-rotate-left">
+    All sessions ordered by most recently updated
+    
+    Shows:
+    - Original search query
+    - Last updated timestamp
+    - Number of messages
+  </Card>
+
+  <Card title="Session Restore" icon="arrow-rotate-left">
+    Click any session to restore it
+    
+    Restores:
+    - Search results
+    - All messages
+    - Active filters
+  </Card>
+</CardGroup>
+
+### Backup & Recovery
+
+```typescript Automatic Backup
+async function upsertChatSession(session: ChatSessionRecord): Promise<void> {
+  // Save to SQLite
+  this.runChatSessionUpsert(session);
+  
+  // Backup to localStorage
+  await backupChatSession({
+    id: session.id,
+    query: session.query,
+    createdAt: session.createdAt,
+    updatedAt: session.updatedAt
+  });
+  
+  await this.persist();
+}
+```
+
+<Note>
+  Chat sessions survive browser refresh and tab closure. Clear browser data will trigger backup recovery.
+</Note>
+
+## Best Practices
+
+### Effective Prompting
+
+<Steps>
+  <Step title="Reference Results">
+    "Which of these repositories is best for X?"
+    
+    Forces the LLM to compare repositories in the current context.
+  </Step>
+  
+  <Step title="Ask for Specifics">
+    "What authentication methods does this library support?"
+    
+    Directs the LLM to extract specific details from README content.
+  </Step>
+  
+  <Step title="Request Comparisons">
+    "Compare the features of the top 3 results"
+    
+    Leverages multiple context chunks for comprehensive answers.
+  </Step>
+</Steps>
+
+### Managing Sessions
+
+<CardGroup cols={2}>
+  <Card title="Clear Context" icon="search">
+    Start a new search to load different repositories into context
+  </Card>
+
+  <Card title="Refine Filters" icon="filter">
+    Adjust filters to change which repositories are in context without losing chat history
+  </Card>
+
+  <Card title="Session Cleanup" icon="trash">
+    Delete old sessions from history to free storage space
+  </Card>
+
+  <Card title="Export Conversations" icon="download">
+    Copy useful conversations from the UI (no built-in export yet)
+  </Card>
+</CardGroup>
+
+## Provider Configuration
+
+Configure which LLM provider to use for chat:
+
+<Tabs>
+  <Tab title="Remote (OpenAI)">
+    ```typescript
+    {
+      id: "openai-compatible",
+      baseUrl: "https://api.openai.com",
+      model: "gpt-4o-mini",
+      apiKey: "sk-..."
+    }
+    ```
+    
+    - Requires API key
+    - High quality responses
+    - Usage costs apply
+  </Tab>
+
+  <Tab title="Local (Ollama)">
+    ```typescript
+    {
+      id: "ollama",
+      baseUrl: "http://localhost:11434",
+      model: "llama3.1:8b",
+      apiKey: "" // Not required
+    }
+    ```
+    
+    - No API key needed
+    - Requires local Ollama installation
+    - Free, private, offline
+  </Tab>
+
+  <Tab title="Browser (WebLLM)">
+    ```typescript
+    {
+      id: "webllm",
+      model: "Llama-3.2-1B-Instruct-q4f16_1-MLC",
+      allowModelDownload: true
+    }
+    ```
+    
+    - Runs entirely in browser
+    - One-time model download
+    - Completely private
+    
+    See [Local LLM](/features/local-llm) for details.
+  </Tab>
+</Tabs>
+
+<Info>
+  Provider settings are accessible via the gear icon in the chat composer.
+</Info>
+
+## Privacy & Security
+
+<CardGroup cols={2}>
+  <Card title="Local Storage" icon="database">
+    All chat sessions stored locally in SQLite
+    
+    Never sent to GitStarRecall servers
+  </Card>
+
+  <Card title="Remote Providers" icon="cloud">
+    OpenAI and other remote providers receive:
+    - Your questions
+    - Repository context snippets
+    
+    Choose local providers for full privacy
+  </Card>
+
+  <Card title="Local Providers" icon="shield-check">
+    Ollama and WebLLM never leave your device
+    
+    100% private, no network requests
+  </Card>
+
+  <Card title="API Keys" icon="key">
+    Stored in browser localStorage only
+    
+    Never transmitted except to configured provider
+  </Card>
+</CardGroup>
+
+## Related Features
+
+<CardGroup cols={3}>
+  <Card title="Semantic Search" icon="magnifying-glass" href="/features/semantic-search">
+    Create search sessions with natural language queries
+  </Card>
+  
+  <Card title="Local LLM" icon="brain" href="/features/local-llm">
+    Run WebLLM models entirely in your browser
+  </Card>
+  
+  <Card title="Local Embeddings" icon="microchip" href="/features/embeddings">
+    Generate embeddings locally with WebGPU/WASM
+  </Card>
+</CardGroup>

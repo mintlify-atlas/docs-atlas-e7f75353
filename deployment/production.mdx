@@ -1,0 +1,338 @@
+---
+title: 'Production Deployment'
+description: 'Deploy GitStarRecall to Vercel with proper configuration'
+---
+
+## Vercel Deployment
+
+GitStarRecall is optimized for deployment on Vercel with built-in SPA routing and serverless API functions.
+
+## Prerequisites
+
+- Vercel account
+- GitHub OAuth app configured for production
+- Domain or Vercel-provided domain for your deployment
+
+## Deployment Steps
+
+<Steps>
+  <Step title="Connect repository to Vercel">
+    - Go to [Vercel Dashboard](https://vercel.com/dashboard)
+    - Click "Add New Project"
+    - Import your GitStarRecall repository
+    - Select the repository and click "Import"
+  </Step>
+
+  <Step title="Configure build settings">
+    Vercel should auto-detect the build configuration. Verify:
+    
+    - **Build Command**: `pnpm build`
+    - **Output Directory**: `dist`
+    - **Install Command**: `pnpm install`
+  </Step>
+
+  <Step title="Configure environment variables">
+    Add all required environment variables in Vercel project settings.
+    
+    See [Environment Variables](#environment-variables) section below for details.
+  </Step>
+
+  <Step title="Deploy">
+    Click "Deploy" and wait for the build to complete.
+    
+    Vercel will provide a production URL (e.g., `https://your-project.vercel.app`).
+  </Step>
+
+  <Step title="Update GitHub OAuth app">
+    Update your GitHub OAuth app callback URL to match your production domain:
+    
+    ```
+    https://your-domain.vercel.app/auth/callback
+    ```
+  </Step>
+</Steps>
+
+## Environment Variables
+
+Configure these environment variables in your Vercel project settings (`Settings > Environment Variables`):
+
+### Required OAuth Configuration
+
+<CodeGroup>
+```bash Client-Side OAuth
+VITE_GITHUB_CLIENT_ID=your_github_oauth_client_id
+VITE_GITHUB_REDIRECT_URI=https://your-domain.vercel.app/auth/callback
+VITE_GITHUB_OAUTH_EXCHANGE_URL=/api/github/oauth/exchange
+```
+
+```bash Server-Side OAuth
+GITHUB_OAUTH_CLIENT_ID=your_github_oauth_client_id
+GITHUB_OAUTH_CLIENT_SECRET=your_github_oauth_client_secret
+GITHUB_OAUTH_REDIRECT_URI=https://your-domain.vercel.app/auth/callback
+```
+</CodeGroup>
+
+<Warning>
+**Critical**: All redirect URI values must match exactly:
+- `.env` file values
+- GitHub OAuth app callback URL
+- Production domain
+
+Mismatches will cause OAuth exchange failures.
+</Warning>
+
+### Recommended Production Settings
+
+```bash
+# Embedding backend (webgpu with wasm fallback)
+VITE_EMBEDDING_BACKEND_PREFERRED=webgpu
+
+# Performance tuning
+VITE_EMBEDDING_POOL_SIZE=1
+VITE_EMBEDDING_WORKER_BATCH_SIZE=12
+VITE_EMBEDDING_DB_WRITE_BATCH_SIZE=512
+VITE_EMBEDDING_UI_UPDATE_MS=350
+
+# Large library optimizations
+VITE_EMBEDDING_LARGE_LIBRARY_MODE=1
+VITE_EMBEDDING_LARGE_LIBRARY_THRESHOLD=500
+
+# README pipeline
+VITE_README_BATCH_PIPELINE_V2=1
+VITE_README_BATCH_SIZE=40
+VITE_EMBED_TRIGGER_THRESHOLD=256
+VITE_EMBED_WINDOW_SIZE=512
+```
+
+### Optional Features
+
+```bash
+# Enable WebLLM (browser-based LLM)
+VITE_WEBLLM_ENABLED=0
+
+# Ollama defaults (if users enable local Ollama)
+VITE_OLLAMA_BASE_URL=http://localhost:11434
+VITE_OLLAMA_MODEL=nomic-embed-text
+VITE_OLLAMA_TIMEOUT_MS=30000
+
+# API key encryption (generate with: openssl rand -hex 32)
+VITE_LLM_SETTINGS_ENCRYPTION_KEY=your_32_byte_hex_key
+```
+
+## Vercel Configuration
+
+The project includes a `vercel.json` file that configures SPA routing:
+
+```json
+{
+  "routes": [
+    { "handle": "filesystem" },
+    { "src": "/(.*)", "dest": "/" }
+  ]
+}
+```
+
+This configuration ensures:
+
+- Static files are served directly from the filesystem
+- All other routes (including `/app` and `/auth/callback`) fall back to `index.html`
+- SPA routing works correctly without 404 errors on page refresh
+
+<Note>
+Do not remove or modify `vercel.json` - it's required for proper SPA behavior.
+</Note>
+
+## OAuth Callback Configuration
+
+The OAuth flow requires proper callback URL configuration:
+
+### For Production Domain
+
+<Steps>
+  <Step title="Update GitHub OAuth app">
+    Go to your [GitHub OAuth App settings](https://github.com/settings/developers) and update:
+    
+    **Authorization callback URL**:
+    ```
+    https://your-domain.vercel.app/auth/callback
+    ```
+  </Step>
+
+  <Step title="Update environment variables">
+    Ensure these match your production domain exactly:
+    
+    ```bash
+    VITE_GITHUB_REDIRECT_URI=https://your-domain.vercel.app/auth/callback
+    GITHUB_OAUTH_REDIRECT_URI=https://your-domain.vercel.app/auth/callback
+    ```
+  </Step>
+
+  <Step title="Redeploy">
+    After updating environment variables, trigger a new deployment for changes to take effect.
+  </Step>
+</Steps>
+
+### Multiple Environments
+
+If you have multiple deployment environments (staging, production), create separate GitHub OAuth apps for each:
+
+- **Development**: `http://localhost:5173/auth/callback`
+- **Preview**: `https://your-project-git-branch.vercel.app/auth/callback`
+- **Production**: `https://your-domain.com/auth/callback`
+
+Configure environment-specific variables in Vercel for each deployment context.
+
+## Security Considerations
+
+### Client Secret Protection
+
+The OAuth exchange endpoint (`api/github/oauth/exchange.js`) keeps the client secret server-side:
+
+- Client secret is **never** exposed to the browser
+- Code exchange happens via serverless function
+- PKCE verifier adds additional security layer
+
+### Token Storage
+
+GitStarRecall follows a secure token handling model:
+
+- OAuth tokens are held in **memory only** (not persisted)
+- PAT tokens can be pasted by users but are not stored as raw tokens
+- Optional: API keys for LLM providers can be encrypted with `VITE_LLM_SETTINGS_ENCRYPTION_KEY`
+
+<Warning>
+The encryption key is embedded in the client bundle. It protects against casual exfiltration but not attackers with source access.
+</Warning>
+
+### Content Security Policy
+
+The application includes a strict CSP with explicit allowlist:
+
+- Prevents inline script execution
+- Restricts resource loading to trusted domains
+- Mitigates XSS and injection attacks
+
+## Build and Preview Locally
+
+Test the production build locally before deploying:
+
+<Steps>
+  <Step title="Create production build">
+    ```bash
+    pnpm build
+    ```
+    
+    This runs TypeScript type-checking and creates an optimized production bundle in `dist/`.
+  </Step>
+
+  <Step title="Preview production build">
+    ```bash
+    pnpm preview
+    ```
+    
+    This serves the production build locally, typically at `http://localhost:4173`.
+  </Step>
+
+  <Step title="Test OAuth flow">
+    Verify the OAuth flow works with production-like configuration.
+    
+    <Warning>
+    You'll need a separate GitHub OAuth app configured for the preview URL.
+    </Warning>
+  </Step>
+</Steps>
+
+## Deployment Checklist
+
+Before deploying to production:
+
+- [ ] GitHub OAuth app configured with production callback URL
+- [ ] All required environment variables set in Vercel
+- [ ] `VITE_GITHUB_REDIRECT_URI` matches production domain exactly
+- [ ] `GITHUB_OAUTH_REDIRECT_URI` matches production domain exactly
+- [ ] `GITHUB_OAUTH_CLIENT_SECRET` is set (server-side only)
+- [ ] `vercel.json` routing configuration is present
+- [ ] Production build tested locally with `pnpm build && pnpm preview`
+- [ ] Optional: `VITE_LLM_SETTINGS_ENCRYPTION_KEY` generated (if storing API keys)
+
+## Troubleshooting
+
+### `/app` or `/auth/callback` returns 404 on refresh
+
+**Cause**: SPA fallback routing not configured.
+
+**Solution**: Ensure `vercel.json` exists with the proper fallback route:
+
+```json
+{
+  "routes": [
+    { "handle": "filesystem" },
+    { "src": "/(.*)", "dest": "/" }
+  ]
+}
+```
+
+### OAuth exchange fails with redirect_uri_mismatch
+
+**Cause**: Mismatch between environment variables and GitHub OAuth app settings.
+
+**Solution**:
+1. Verify GitHub OAuth app callback URL
+2. Check `VITE_GITHUB_REDIRECT_URI` in Vercel environment variables
+3. Check `GITHUB_OAUTH_REDIRECT_URI` in Vercel environment variables
+4. Ensure all three match exactly (including `https://` protocol)
+
+### Environment variables not updating
+
+**Cause**: Vercel caches builds and environment variables are only read at build time.
+
+**Solution**: 
+1. Update environment variables in Vercel dashboard
+2. Trigger a new deployment (redeploy or push new commit)
+3. Clear browser cache and reload
+
+### Build fails with TypeScript errors
+
+**Cause**: Type-checking fails during `tsc -b` step.
+
+**Solution**:
+1. Run `pnpm build` locally to reproduce
+2. Fix TypeScript errors
+3. Commit and push changes
+4. Redeploy
+
+## Monitoring and Maintenance
+
+### Vercel Deployment Logs
+
+Monitor deployment status and runtime errors:
+
+- Build logs: Check for build-time failures
+- Function logs: Monitor serverless function execution (`/api/github/oauth/exchange`)
+- Runtime errors: Track client-side errors in browser console
+
+### Performance Monitoring
+
+GitStarRecall includes built-in telemetry for embedding operations:
+
+- Backend selection (WebGPU vs WASM)
+- Throughput metrics
+- Checkpoint behavior
+- Queue depth
+- Worker pool activity
+
+Monitor these in the browser UI during indexing operations.
+
+## Rolling Updates
+
+When deploying updates:
+
+1. Test changes locally with `pnpm ci` (lint + test + build)
+2. Deploy to preview environment first
+3. Test OAuth flow and critical features
+4. Promote to production
+5. Monitor error rates and user reports
+
+<Note>
+Vercel automatically creates preview deployments for each branch/PR, making it easy to test changes before merging.
+</Note>

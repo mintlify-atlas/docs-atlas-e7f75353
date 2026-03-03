@@ -1,0 +1,308 @@
+---
+title: Performance Tuning
+description: Optimize GitStarRecall for large repositories and improve embedding generation speed
+---
+
+GitStarRecall is designed to handle 1,000+ starred repositories efficiently. This guide covers performance optimization strategies for embedding generation, storage, and search.
+
+## Embedding Performance Overview
+
+Embedding generation is the most compute-intensive operation. The system uses a multi-layered optimization approach:
+
+- **WebGPU acceleration** with automatic WASM fallback
+- **Worker pool parallelism** with adaptive downshifting
+- **Micro-batch processing** to balance throughput and memory
+- **Checkpointed persistence** to reduce write overhead
+
+## Performance Metrics
+
+<Info>
+**Target performance** (1,000 stars on modern laptop):
+- Time to first searchable chunks: < 120 seconds
+- Embedding throughput improvement: 30%+ over baseline
+- Query response time: < 2 seconds after indexing
+</Info>
+
+## Embedding Pool Size
+
+Control the number of parallel embedding workers.
+
+<ParamField path="VITE_EMBEDDING_POOL_SIZE" type="number" default="1">
+  Number of concurrent embedding workers (clamped to `1..2`).
+</ParamField>
+
+### Configuration Guide
+
+| Device Type | RAM | Recommended Pool Size | Notes |
+|-------------|-----|----------------------|-------|
+| Budget laptop | < 8GB | `1` | Avoid memory pressure |
+| Standard laptop | 8-16GB | `1-2` | Start with `1`, increase to `2` if stable |
+| High-end desktop | 16GB+ | `2` | Maximum parallelism |
+| Mobile/tablet | < 4GB | `1` | Always use single worker |
+
+<Warning>
+Increasing pool size from `1` to `2` can improve throughput by 30-50%, but doubles peak memory usage. Monitor for browser memory errors and reduce if crashes occur.
+</Warning>
+
+### Adaptive Downshifting
+
+The system automatically reduces pool size when it detects:
+- Memory pressure errors
+- Worker initialization failures
+- Repeated embedding failures
+
+Downshift events are logged and visible in the UI diagnostics panel.
+
+## Worker Batch Size
+
+Control how many texts are processed per worker batch.
+
+<ParamField path="VITE_EMBEDDING_WORKER_BATCH_SIZE" type="number" default="12">
+  Texts per batch (clamped to `1..32`).
+</ParamField>
+
+### Configuration Guide
+
+| Scenario | Recommended Batch Size | Rationale |
+|----------|----------------------|----------|
+| Low memory (< 8GB RAM) | `8` | Reduce memory footprint |
+| Standard (8-16GB RAM) | `12-16` | Balance throughput and stability |
+| High performance (16GB+ RAM) | `16-24` | Maximize batch efficiency |
+| Debugging/stability issues | `4` | Isolate problematic texts |
+
+<Note>
+The system adaptively reduces batch size on failures. Start with default (`12`) and increase gradually while monitoring stability.
+</Note>
+
+## Large Library Mode
+
+Optimizations specifically for 500+ starred repositories.
+
+<ParamField path="VITE_EMBEDDING_LARGE_LIBRARY_MODE" type="number" default="1">
+  Enable large library optimizations (`0` = disabled, `1` = enabled).
+</ParamField>
+
+<ParamField path="VITE_EMBEDDING_LARGE_LIBRARY_THRESHOLD" type="number" default="500">
+  Minimum repositories to trigger optimizations.
+</ParamField>
+
+### Large Library Optimizations
+
+When enabled, the system:
+
+1. **Priority ordering** - Processes recently updated repositories first
+2. **Resumable cursors** - Saves indexing position to recover from crashes
+3. **Adaptive batching** - Dynamically adjusts batch size based on available chunks
+4. **Checkpoint coordination** - Reduces DB write frequency for large batches
+
+```bash title=".env.local"
+# Recommended for 500+ stars
+VITE_EMBEDDING_LARGE_LIBRARY_MODE=1
+VITE_EMBEDDING_LARGE_LIBRARY_THRESHOLD=500
+VITE_EMBEDDING_POOL_SIZE=2
+VITE_EMBEDDING_WORKER_BATCH_SIZE=16
+```
+
+## Database Write Optimization
+
+Reduce write overhead with batched database commits.
+
+<ParamField path="VITE_EMBEDDING_DB_WRITE_BATCH_SIZE" type="number" default="512">
+  Number of embeddings buffered before SQLite write.
+</ParamField>
+
+### Write Strategy
+
+- **Small libraries (< 100 repos):** Use default `512`
+- **Large libraries (500+ repos):** Consider increasing to `1024` for fewer writes
+- **Crash recovery concern:** Reduce to `256` to minimize loss window
+
+<Info>
+Checkpoints occur both at record-count intervals and time intervals. A final flush ensures all data is persisted on completion.
+</Info>
+
+## README Fetching Performance
+
+Optimize GitHub API usage during initial sync.
+
+<ParamField path="VITE_README_BATCH_SIZE" type="number" default="40">
+  Number of READMEs to fetch concurrently.
+</ParamField>
+
+<ParamField path="VITE_README_BATCH_PIPELINE_V2" type="number" default="0">
+  Enable experimental v2 pipeline with adaptive concurrency.
+</ParamField>
+
+### Fetch Strategy
+
+| Scenario | Batch Size | Pipeline | Notes |
+|----------|-----------|----------|-------|
+| Standard (< 500 stars) | `40` | `0` (default) | Balanced approach |
+| Large (500-1000 stars) | `30-40` | `1` (v2) | Adaptive cooldown prevents rate limits |
+| Very large (1000+ stars) | `20-30` | `1` (v2) | Conservative to avoid 429 errors |
+| Rate limit issues | `10-20` | `1` (v2) | Prioritize reliability |
+
+<Warning>
+GitHub API has rate limits (5,000 requests/hour for authenticated users). The v2 pipeline includes automatic backoff and retry logic to handle 429 responses gracefully.
+</Warning>
+
+## UI Update Throttling
+
+Prevent main-thread pressure during long indexing runs.
+
+<ParamField path="VITE_EMBEDDING_UI_UPDATE_MS" type="number" default="350">
+  Throttle interval (milliseconds) for progress updates.
+</ParamField>
+
+### Configuration Guide
+
+- **Fast UI (high CPU):** `250-300ms` - More responsive updates
+- **Balanced:** `350ms` - Default, good for most cases
+- **Slow device:** `500-1000ms` - Reduce main-thread load
+
+## WebGPU vs WASM Backend
+
+Choose the optimal compute backend for your hardware.
+
+<ParamField path="VITE_EMBEDDING_BACKEND_PREFERRED" type="string" default="webgpu">
+  Backend preference: `webgpu` (GPU-first) or `wasm` (CPU-only).
+</ParamField>
+
+### Backend Comparison
+
+| Backend | Speed | Compatibility | Memory | Use Case |
+|---------|-------|---------------|--------|----------|
+| **WebGPU** | ⚡⚡⚡ Fast | Modern browsers only | Higher | Default, best performance |
+| **WASM** | ⚡⚡ Moderate | Universal | Lower | Fallback, older devices |
+
+### Platform Support
+
+- **Windows:** WebGPU → Direct3D backend
+- **macOS:** WebGPU → Metal backend  
+- **Linux:** WebGPU → Vulkan backend
+- **All platforms:** WASM CPU fallback
+
+<Note>
+The app automatically falls back to WASM if WebGPU is unavailable. Fallback reason is logged and visible in diagnostics.
+</Note>
+
+### Force WASM Mode
+
+If you experience GPU-related issues:
+
+```bash title=".env.local"
+VITE_EMBEDDING_BACKEND_PREFERRED=wasm
+```
+
+This acts as a "kill switch" to force CPU-only embedding.
+
+## Chunking Configuration
+
+Control text chunking behavior for embedding generation.
+
+<ParamField path="VITE_EMBED_WINDOW_SIZE" type="number" default="512">
+  Maximum chunk size in characters.
+</ParamField>
+
+<ParamField path="VITE_EMBED_TRIGGER_THRESHOLD" type="number" default="256">
+  Minimum pending chunks before triggering batch.
+</ParamField>
+
+### Chunking Strategy
+
+- **Window size (`512`):** Balances semantic context and retrieval granularity
+- **Trigger threshold (`256`):** Prevents frequent small batches during sync
+- READMEs are truncated to 100,000 characters before chunking
+- Chunks have 80-120 character overlap to preserve context at boundaries
+
+## Monitoring and Diagnostics
+
+The app tracks and displays detailed performance metrics:
+
+### Embedding Run Metadata
+
+```typescript
+{
+  backend: "webgpu" | "wasm",
+  poolSize: 2,
+  downshift: false,
+  batchCount: 145,
+  latencyMs: 1240,
+  queueDepth: 0,
+  fallbackReason: null
+}
+```
+
+### Access Diagnostics
+
+1. Open the app after completing an embedding run
+2. Check the status panel for "Last embedding run" metrics
+3. Review `backend`, `downshift`, and `fallbackReason` for issues
+4. Adjust configuration based on observed behavior
+
+## Recommended Configurations
+
+### Budget Setup (< 8GB RAM)
+
+```bash title=".env.local"
+VITE_EMBEDDING_BACKEND_PREFERRED=wasm
+VITE_EMBEDDING_POOL_SIZE=1
+VITE_EMBEDDING_WORKER_BATCH_SIZE=8
+VITE_README_BATCH_SIZE=20
+```
+
+### Standard Setup (8-16GB RAM)
+
+```bash title=".env.local"
+VITE_EMBEDDING_BACKEND_PREFERRED=webgpu
+VITE_EMBEDDING_POOL_SIZE=1
+VITE_EMBEDDING_WORKER_BATCH_SIZE=12
+VITE_EMBEDDING_LARGE_LIBRARY_MODE=1
+VITE_README_BATCH_SIZE=40
+```
+
+### High-Performance Setup (16GB+ RAM, 1000+ stars)
+
+```bash title=".env.local"
+VITE_EMBEDDING_BACKEND_PREFERRED=webgpu
+VITE_EMBEDDING_POOL_SIZE=2
+VITE_EMBEDDING_WORKER_BATCH_SIZE=16
+VITE_EMBEDDING_DB_WRITE_BATCH_SIZE=1024
+VITE_EMBEDDING_LARGE_LIBRARY_MODE=1
+VITE_EMBEDDING_LARGE_LIBRARY_THRESHOLD=500
+VITE_README_BATCH_SIZE=30
+VITE_README_BATCH_PIPELINE_V2=1
+```
+
+## Troubleshooting Performance Issues
+
+### Slow Indexing
+
+1. **Check backend**: Verify WebGPU is active (not fallback to WASM)
+2. **Increase pool size**: Try `VITE_EMBEDDING_POOL_SIZE=2`
+3. **Increase batch size**: Try `VITE_EMBEDDING_WORKER_BATCH_SIZE=16`
+4. **Enable large library mode**: Set `VITE_EMBEDDING_LARGE_LIBRARY_MODE=1`
+
+### Memory Crashes
+
+1. **Reduce pool size**: Set `VITE_EMBEDDING_POOL_SIZE=1`
+2. **Reduce batch size**: Set `VITE_EMBEDDING_WORKER_BATCH_SIZE=8`
+3. **Force WASM**: Set `VITE_EMBEDDING_BACKEND_PREFERRED=wasm`
+4. **Check downshift events**: Review diagnostics for adaptive reductions
+
+### Rate Limit Errors
+
+1. **Enable v2 pipeline**: Set `VITE_README_BATCH_PIPELINE_V2=1`
+2. **Reduce batch size**: Set `VITE_README_BATCH_SIZE=20`
+3. **Wait and retry**: GitHub rate limits reset hourly
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Environment Variables" icon="gear" href="/configuration/environment-variables">
+    Complete reference for all configuration options
+  </Card>
+  <Card title="Security" icon="shield-halved" href="/configuration/security">
+    Learn about data privacy and security controls
+  </Card>
+</CardGroup>

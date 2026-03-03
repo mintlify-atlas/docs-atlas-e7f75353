@@ -1,0 +1,316 @@
+---
+title: "Embedding Pipeline"
+description: "Client for generating semantic embeddings using WebGPU or WASM backends"
+---
+
+## Overview
+
+The `Embedder` class provides a worker-based client for generating text embeddings. It automatically selects between WebGPU and WASM backends based on hardware capabilities.
+
+## Initialization
+
+### Constructor
+
+Create a new embedder instance.
+
+```typescript
+import { Embedder } from "./embeddings/Embedder";
+
+// Default: auto-detect worker and prefer WebGPU
+const embedder = new Embedder();
+
+// Specify backend preference
+const embedder = new Embedder({
+  preferredBackend: "wasm"
+});
+```
+
+<ParamField path="options.preferredBackend" type="EmbeddingBackendPreference">
+  Preferred backend: `"webgpu"` (default) or `"wasm"`
+</ParamField>
+
+<ParamField path="options.workerFactory" type="() => Worker">
+  Optional custom worker factory for testing
+</ParamField>
+
+## Single Text Embedding
+
+### embed()
+
+Generate embedding for a single text.
+
+```typescript
+const vector = await embedder.embed("semantic search query");
+console.log(`Vector dimensions: ${vector.length}`);
+// Vector dimensions: 384
+```
+
+<ParamField path="text" type="string" required>
+  Input text to embed
+</ParamField>
+
+<ResponseField name="Returns" type="Promise<Float32Array>">
+  384-dimensional L2-normalized embedding vector
+</ResponseField>
+
+<ResponseField name="Throws" type="Error">
+  If embedding fails or worker returns empty vector
+</ResponseField>
+
+## Batch Embedding
+
+### embedBatch()
+
+Generate embeddings for multiple texts in parallel.
+
+```typescript
+const results = await embedder.embedBatch([
+  "first document",
+  "second document",
+  "third document"
+]);
+
+for (let i = 0; i < results.length; i++) {
+  const { embedding, error } = results[i];
+  if (error) {
+    console.error(`Failed to embed item ${i}: ${error}`);
+  } else {
+    console.log(`Embedded item ${i}: ${embedding.length} dimensions`);
+  }
+}
+```
+
+<ParamField path="texts" type="string[]" required>
+  Array of input texts to embed
+</ParamField>
+
+<ResponseField name="Returns" type="Promise<BatchEmbeddingResultItem[]>">
+  Array of results, one per input text, in the same order
+</ResponseField>
+
+<Note>
+  Batch embedding returns per-item errors rather than rejecting the entire batch. Always check the `error` field for each result.
+</Note>
+
+### BatchEmbeddingResultItem
+
+```typescript
+type BatchEmbeddingResultItem = {
+  embedding: Float32Array | null;
+  error: string | null;
+};
+```
+
+<ResponseField name="embedding" type="Float32Array | null">
+  384-dimensional embedding vector, or null if embedding failed
+</ResponseField>
+
+<ResponseField name="error" type="string | null">
+  Error message if embedding failed, or null on success
+</ResponseField>
+
+## Runtime Inspection
+
+### getRuntimeInfo()
+
+Get backend selection diagnostics.
+
+```typescript
+const info = embedder.getRuntimeInfo();
+console.log(`Preferred: ${info.preferredBackend}`);
+console.log(`Selected: ${info.selectedBackend}`);
+if (info.fallbackReason) {
+  console.log(`Fallback reason: ${info.fallbackReason}`);
+}
+```
+
+<ResponseField name="Returns" type="EmbeddingRuntimeInfo">
+  Runtime backend information
+</ResponseField>
+
+### EmbeddingRuntimeInfo
+
+```typescript
+type EmbeddingRuntimeInfo = {
+  preferredBackend: EmbeddingBackendPreference;
+  selectedBackend: EmbeddingBackendPreference | null;
+  fallbackReason: string | null;
+};
+```
+
+<ResponseField name="preferredBackend" type="EmbeddingBackendPreference">
+  User-specified or default backend preference: `"webgpu"` | `"wasm"`
+</ResponseField>
+
+<ResponseField name="selectedBackend" type="EmbeddingBackendPreference | null">
+  Actual backend selected by worker, or null if no embeddings generated yet
+</ResponseField>
+
+<ResponseField name="fallbackReason" type="string | null">
+  Reason for fallback to WASM if WebGPU was preferred. Examples:
+  - `"navigator.gpu unavailable"`
+  - `"WebGPU adapter failed"`
+</ResponseField>
+
+## Worker Lifecycle
+
+### terminate()
+
+Terminate the worker thread and free resources.
+
+```typescript
+// When done with embeddings
+embedder.terminate();
+```
+
+<Note>
+  Always call `terminate()` when done to prevent memory leaks. The worker cannot be reused after termination.
+</Note>
+
+## Vector Utilities
+
+### float32ToBlob()
+
+Convert Float32Array to Uint8Array for database storage.
+
+```typescript
+import { float32ToBlob } from "./embeddings/vector";
+
+const vector = await embedder.embed("text");
+const blob = float32ToBlob(vector);
+
+await db.upsertEmbeddings([{
+  id: "emb-1",
+  chunkId: "chunk-1",
+  model: "Xenova/all-MiniLM-L6-v2",
+  dimension: vector.length,
+  vectorBlob: blob,
+  createdAt: Date.now()
+}]);
+```
+
+<ParamField path="vec" type="Float32Array" required>
+  Embedding vector to convert
+</ParamField>
+
+<ResponseField name="Returns" type="Uint8Array">
+  L2-normalized vector encoded as bytes (4 bytes per float)
+</ResponseField>
+
+### blobToFloat32()
+
+Convert stored Uint8Array back to Float32Array.
+
+```typescript
+import { blobToFloat32 } from "./embeddings/vector";
+
+const result = db.exec("SELECT vector_blob FROM embeddings WHERE id = ?", ["emb-1"]);
+const blob = result[0].values[0][0] as Uint8Array;
+const vector = blobToFloat32(blob);
+```
+
+<ParamField path="blob" type="Uint8Array" required>
+  Byte array from database
+</ParamField>
+
+<ResponseField name="Returns" type="Float32Array">
+  Reconstructed embedding vector
+</ResponseField>
+
+### l2Normalize()
+
+Normalize a vector to unit length.
+
+```typescript
+import { l2Normalize } from "./embeddings/vector";
+
+const raw = new Float32Array([3, 4]);
+const normalized = l2Normalize(raw);
+// normalized = [0.6, 0.8]
+
+let sumSquares = 0;
+for (const val of normalized) {
+  sumSquares += val * val;
+}
+console.log(Math.sqrt(sumSquares)); // 1.0
+```
+
+<ParamField path="vec" type="Float32Array" required>
+  Vector to normalize
+</ParamField>
+
+<ResponseField name="Returns" type="Float32Array">
+  New normalized vector with L2 norm = 1.0. Returns copy of input if norm is 0.
+</ResponseField>
+
+## Usage Example
+
+```typescript
+import { Embedder } from "./embeddings/Embedder";
+import { float32ToBlob } from "./embeddings/vector";
+import { getDb } from "./db/client";
+
+const embedder = new Embedder({ preferredBackend: "webgpu" });
+const db = await getDb();
+
+// Get chunks that need embedding
+const chunks = db.getChunksToEmbed(50);
+
+// Batch embed all texts
+const texts = chunks.map(c => c.text);
+const results = await embedder.embedBatch(texts);
+
+// Store successful embeddings
+const embeddings = [];
+for (let i = 0; i < results.length; i++) {
+  const { embedding, error } = results[i];
+  if (error) {
+    console.error(`Failed to embed chunk ${chunks[i].id}: ${error}`);
+    continue;
+  }
+  embeddings.push({
+    id: `emb-${chunks[i].id}`,
+    chunkId: chunks[i].id,
+    model: "Xenova/all-MiniLM-L6-v2",
+    dimension: embedding.length,
+    vectorBlob: float32ToBlob(embedding),
+    createdAt: Date.now()
+  });
+}
+
+await db.upsertEmbeddings(embeddings);
+
+// Check runtime info
+const info = embedder.getRuntimeInfo();
+console.log(`Backend: ${info.selectedBackend}`);
+
+// Clean up
+embedder.terminate();
+```
+
+## Types
+
+### EmbeddingBackendPreference
+
+```typescript
+type EmbeddingBackendPreference = "webgpu" | "wasm";
+```
+
+### BatchEmbeddingResultItem
+
+```typescript
+type BatchEmbeddingResultItem = {
+  embedding: Float32Array | null;
+  error: string | null;
+};
+```
+
+### EmbeddingRuntimeInfo
+
+```typescript
+type EmbeddingRuntimeInfo = {
+  preferredBackend: EmbeddingBackendPreference;
+  selectedBackend: EmbeddingBackendPreference | null;
+  fallbackReason: string | null;
+};
+```

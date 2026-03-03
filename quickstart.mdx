@@ -1,80 +1,264 @@
 ---
-title: "Quickstart"
-description: "Start building awesome documentation in minutes"
+title: Quickstart
+description: Get from install to first search in under 5 minutes
 ---
 
-## Get started in three steps
+## Prerequisites
 
-Get your documentation site running locally and make your first customization.
+Before you begin, ensure you have:
 
-### Step 1: Set up your local environment
+- Node.js 20+
+- pnpm 9+
+- A GitHub account
+- GitHub OAuth app (recommended) or Personal Access Token
 
-<AccordionGroup>
-  <Accordion icon="copy" title="Clone your docs locally">
-    During the onboarding process, you created a GitHub repository with your docs content if you didn't already have one. You can find a link to this repository in your [dashboard](https://dashboard.mintlify.com).
-    
-    To clone the repository locally so that you can make and preview changes to your docs, follow the [Cloning a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository) guide in the GitHub docs.
-  </Accordion>
-  <Accordion icon="rectangle-terminal" title="Start the preview server">
-    1. Install the Mintlify CLI: `npm i -g mint`
-    2. Navigate to your docs directory and run: `mint dev`
-    3. Open `http://localhost:3000` to see your docs live!
-    
-    <Tip>Your preview updates automatically as you edit files.</Tip>
-  </Accordion>
-</AccordionGroup>
+<Warning>
+  WebGPU-capable browser recommended for best embedding performance. Chrome, Edge, or Firefox with WebGPU enabled.
+</Warning>
 
-### Step 2: Deploy your changes
+## Installation
 
-<AccordionGroup>
-  <Accordion icon="github" title="Install our GitHub app">
-    Install the Mintlify GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app).
-    
-    Our GitHub app automatically deploys your changes to your docs site, so you don't need to manage deployments yourself.
-</Accordion>
-<Accordion icon="palette" title="Update your site name and colors">
-    For a first change, let's update the name and colors of your docs site.
+<Steps>
+  <Step title="Clone and Install">
+    Clone the repository and install dependencies using pnpm:
 
-    1. Open `docs.json` in your editor.
-    2. Change the `"name"` field to your project name.
-    3. Update the `"colors"` to match your brand.
-    4. Save and see your changes instantly at `http://localhost:3000`.
+    ```bash
+    git clone https://github.com/Abhinandan-Khurana/GitStarRecall.git
+    cd GitStarRecall
+    pnpm install
+    ```
+  </Step>
 
-    <Tip>Try changing the primary color to see an immediate difference!</Tip>
-  </Accordion>
-</AccordionGroup>
+  <Step title="Configure Environment">
+    Copy the example environment file and configure your GitHub OAuth credentials:
 
-### Step 3: Go live
+    ```bash
+    cp .env.example .env
+    ```
 
-<Accordion icon="rocket" title="Publish your docs">
-  1. Commit and push your changes.
-  2. Your docs will update and be live in moments!
-</Accordion>
+    Edit `.env` and set the required OAuth variables:
 
-## Next steps
+    <CodeGroup>
+    ```bash Local Development
+    # GitHub OAuth app client ID
+    VITE_GITHUB_CLIENT_ID=your_client_id_here
+    GITHUB_OAUTH_CLIENT_ID=your_client_id_here
+    GITHUB_OAUTH_CLIENT_SECRET=your_client_secret_here
 
-Now that you have your docs running, explore these key features:
+    # Callback URL (must match GitHub OAuth app settings)
+    VITE_GITHUB_REDIRECT_URI=http://localhost:5173/auth/callback
+    GITHUB_OAUTH_REDIRECT_URI=http://localhost:5173/auth/callback
 
-<CardGroup cols={2}>
+    # OAuth exchange endpoint
+    VITE_GITHUB_OAUTH_EXCHANGE_URL=/api/github/oauth/exchange
+    ```
 
-<Card title="Write Content" icon="pen-to-square" href="/essentials/markdown">
-  Learn MDX syntax and start writing your documentation.
-</Card>
+    ```bash Production
+    # GitHub OAuth app client ID
+    VITE_GITHUB_CLIENT_ID=your_client_id_here
+    GITHUB_OAUTH_CLIENT_ID=your_client_id_here
+    GITHUB_OAUTH_CLIENT_SECRET=your_client_secret_here
 
-<Card title="Customize style" icon="palette" href="/essentials/settings">
-  Make your docs match your brand perfectly.
-</Card>
+    # Callback URL (must match GitHub OAuth app settings)
+    VITE_GITHUB_REDIRECT_URI=https://your-domain.com/auth/callback
+    GITHUB_OAUTH_REDIRECT_URI=https://your-domain.com/auth/callback
 
-<Card title="Add code examples" icon="square-code" href="/essentials/code">
-  Include syntax-highlighted code blocks.
-</Card>
+    # OAuth exchange endpoint
+    VITE_GITHUB_OAUTH_EXCHANGE_URL=/api/github/oauth/exchange
+    ```
+    </CodeGroup>
 
-<Card title="API documentation" icon="code" href="/api-reference/introduction">
-  Auto-generate API docs from OpenAPI specs.
-</Card>
+    <Note>
+      Don't have a GitHub OAuth app yet? See the [Authentication guide](/authentication) for setup instructions.
+    </Note>
+  </Step>
 
-</CardGroup>
+  <Step title="Start Development Server">
+    Run the development server:
+
+    ```bash
+    pnpm dev
+    ```
+
+    Open [http://localhost:5173](http://localhost:5173) in your browser.
+  </Step>
+
+  <Step title="Authenticate with GitHub">
+    Click **Connect GitHub** on the landing page to start the OAuth flow. You'll be redirected to GitHub to authorize the app.
+
+    <Info>
+      The app requests `read:user` and `repo` scopes to access your starred repositories, including private stars.
+    </Info>
+
+    After authorization, you'll be redirected back to the app.
+  </Step>
+
+  <Step title="Fetch Your Stars">
+    Click the **Fetch Stars** button to sync your starred repositories. This will:
+
+    - Pull all your starred repos (with pagination)
+    - Fetch README content for each repo
+    - Generate embeddings locally using browser workers
+    - Store everything in local SQLite database
+
+    <Warning>
+      For large libraries (500+ stars), initial indexing may take several minutes. Progress is shown in the UI with real-time telemetry.
+    </Warning>
+  </Step>
+
+  <Step title="Search Your Stars">
+    Once indexing completes, use the search box to query in natural language:
+
+    ```text
+    Show me React component libraries with good TypeScript support
+    ```
+
+    Results are retrieved from your local vector index - no API calls required.
+  </Step>
+
+  <Step title="Get AI Recommendations (Optional)">
+    Click on a search result to open a chat session. You can:
+
+    - Ask follow-up questions
+    - Request tailored recommendations
+    - Refine results with natural language filters
+
+    <Note>
+      By default, chat uses local search only. Enable LLM providers in settings to generate AI-powered answers.
+    </Note>
+  </Step>
+</Steps>
+
+## Optional: Enable Advanced Features
+
+### Browser WebLLM (Fully Local AI)
+
+Enable fully local LLM inference in your browser:
+
+```bash .env
+VITE_WEBLLM_ENABLED=1
+```
+
+On first use, the app will ask for consent to download a model (360MB-1.5GB depending on device capabilities).
+
+### Ollama Local Embeddings
+
+For faster embedding generation, use Ollama:
+
+<Steps>
+  <Step title="Install and Start Ollama">
+    ```bash
+    # Expose Ollama to browser CORS
+    export OLLAMA_ORIGINS="*"
+    ollama serve
+    ```
+  </Step>
+  <Step title="Pull Embedding Model">
+    ```bash
+    ollama pull nomic-embed-text
+    ```
+  </Step>
+  <Step title="Configure Environment">
+    ```bash .env
+    VITE_OLLAMA_BASE_URL=http://localhost:11434
+    VITE_OLLAMA_MODEL=nomic-embed-text
+    ```
+  </Step>
+  <Step title="Enable in App">
+    In the app settings, enable **Use Ollama for local embeddings** and test the connection.
+  </Step>
+</Steps>
+
+## Performance Tuning for Large Libraries
+
+If you have 500+ starred repos, optimize embedding performance:
+
+```bash .env
+# Enable large library mode
+VITE_EMBEDDING_LARGE_LIBRARY_MODE=1
+VITE_EMBEDDING_LARGE_LIBRARY_THRESHOLD=500
+
+# Enable batched README pipeline
+VITE_README_BATCH_PIPELINE_V2=1
+
+# Tune worker pool for your machine
+VITE_EMBEDDING_POOL_SIZE=1
+VITE_EMBEDDING_WORKER_BATCH_SIZE=12
+```
+
+<Info>
+  The app exposes indexing telemetry in the UI showing throughput, backend selection, and checkpoint behavior.
+</Info>
+
+## Production Deployment
+
+### Vercel Deployment
+
+Set environment variables in Vercel dashboard:
+
+```bash
+VITE_GITHUB_CLIENT_ID=your_client_id
+VITE_GITHUB_REDIRECT_URI=https://your-domain.com/auth/callback
+VITE_GITHUB_OAUTH_EXCHANGE_URL=/api/github/oauth/exchange
+
+GITHUB_OAUTH_CLIENT_ID=your_client_id
+GITHUB_OAUTH_CLIENT_SECRET=your_client_secret
+GITHUB_OAUTH_REDIRECT_URI=https://your-domain.com/auth/callback
+```
 
 <Note>
-  **Need help?** See our [full documentation](https://mintlify.com/docs) or join our [community](https://mintlify.com/community).
+  The included `vercel.json` handles SPA routing automatically. `/auth/callback` and `/app` routes will work correctly.
 </Note>
+
+### Build and Preview
+
+```bash
+pnpm build
+pnpm preview
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Authentication Setup" icon="key" href="/authentication">
+    Detailed OAuth app setup and PAT fallback configuration
+  </Card>
+  <Card title="Core Features" icon="book" href="/features/semantic-search">
+    Learn about semantic search, chat sessions, and LLM modes
+  </Card>
+  <Card title="Architecture" icon="diagram-project" href="/advanced/architecture">
+    Understand the local-first architecture and security model
+  </Card>
+  <Card title="Troubleshooting" icon="wrench" href="/advanced/troubleshooting">
+    Common issues and solutions
+  </Card>
+</CardGroup>
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="OAuth callback returns 404">
+    - Verify callback URL in GitHub OAuth app matches `VITE_GITHUB_REDIRECT_URI` exactly
+    - Check that `GITHUB_OAUTH_REDIRECT_URI` matches on server side
+    - Ensure production has SPA fallback routing configured
+  </Accordion>
+
+  <Accordion title="Embedding is very slow">
+    - Check if WebGPU is available in your browser (check console)
+    - Reduce worker pool size: `VITE_EMBEDDING_POOL_SIZE=1`
+    - Lower batch size: `VITE_EMBEDDING_WORKER_BATCH_SIZE=8`
+    - Consider Ollama for faster embedding generation
+  </Accordion>
+
+  <Accordion title="localStorage quota exceeded">
+    - App will fallback to memory-only mode for that session
+    - Click `Delete local data` in settings, then re-index incrementally
+    - Enable `VITE_README_BATCH_PIPELINE_V2=1` for better memory usage
+  </Accordion>
+
+  <Accordion title="PAT authentication fails with 401">
+    - Use raw token only (no `Bearer` prefix)
+    - Verify token has `read:user` and `repo` scopes
+    - Check token hasn't expired
+  </Accordion>
+</AccordionGroup>

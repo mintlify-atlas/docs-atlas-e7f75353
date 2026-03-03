@@ -1,0 +1,492 @@
+---
+title: Local Embeddings
+description: Generate vector embeddings locally using WebGPU and WASM for complete privacy
+---
+
+GitStarRecall generates embeddings entirely in your browser using WebGPU or WASM backends. No cloud API calls, no usage costs, and complete privacy.
+
+## Architecture
+
+Embeddings are generated using a worker pool architecture for optimal performance:
+
+<Steps>
+  <Step title="Worker Pool">
+    Multiple Web Workers process embeddings in parallel
+  </Step>
+  
+  <Step title="Backend Selection">
+    Automatically chooses WebGPU (fast) or WASM (compatible) based on browser support
+  </Step>
+  
+  <Step title="Batch Processing">
+    Chunks are processed in batches of 8 for efficiency
+  </Step>
+  
+  <Step title="Checkpointing">
+    Progress saved periodically to prevent data loss
+  </Step>
+</Steps>
+
+## Backend Selection
+
+GitStarRecall automatically selects the best embedding backend:
+
+### WebGPU (Preferred)
+
+<Tip>
+  WebGPU provides 3-5x faster embedding generation compared to WASM.
+</Tip>
+
+```typescript WebGPU Probe
+export async function probeWebGpuSupport(
+  navigatorLike: unknown
+): Promise<WebGpuProbeResult> {
+  const gpu = (navigatorLike as { gpu?: GpuLike })?.gpu;
+  if (!gpu || typeof gpu.requestAdapter !== "function") {
+    return {
+      ok: false,
+      reason: "navigator.gpu unavailable"
+    };
+  }
+
+  try {
+    const adapter = await gpu.requestAdapter();
+    if (!adapter) {
+      return {
+        ok: false,
+        reason: "no WebGPU adapter available"
+      };
+    }
+    await adapter.requestDevice();
+    return { ok: true };
+  } catch (error) {
+    return {
+      ok: false,
+      reason: `webgpu probe error: ${error.message}`
+    };
+  }
+}
+```
+
+**Fallback Logic**:
+
+```typescript Backend Resolution
+export function resolvePreferredBackend(
+  preferredBackend: EmbeddingBackendPreference,
+  probeResult: WebGpuProbeResult
+): { backend: EmbeddingBackendPreference; fallbackReason: string | null } {
+  if (preferredBackend === "wasm") {
+    return { backend: "wasm", fallbackReason: null };
+  }
+
+  if (probeResult.ok) {
+    return { backend: "webgpu", fallbackReason: null };
+  }
+
+  return {
+    backend: "wasm",
+    fallbackReason: probeResult.reason
+  };
+}
+```
+
+### WASM (Fallback)
+
+Used when WebGPU is unavailable:
+
+- **Compatibility**: Works in all modern browsers
+- **Performance**: Slower than WebGPU but still runs locally
+- **Memory**: Lower memory usage than WebGPU
+
+<Info>
+  Safari on iOS uses WASM due to limited WebGPU support.
+</Info>
+
+## Worker Pool
+
+Embeddings are generated using a configurable worker pool:
+
+```typescript Worker Pool Configuration
+const DEFAULT_POOL_SIZE = 2;
+const DEFAULT_MAX_POOL_SIZE = 2;
+const DEFAULT_WORKER_BATCH_SIZE = 8;
+
+class EmbeddingWorkerPool {
+  private configuredPoolSize: number;
+  private activePoolSize: number;
+  private embedders: EmbedderLike[] = [];
+
+  constructor(options: EmbeddingWorkerPoolOptions = {}) {
+    this.configuredPoolSize = options.poolSize ?? DEFAULT_POOL_SIZE;
+    this.activePoolSize = Math.min(
+      this.configuredPoolSize,
+      options.maxPoolSize ?? DEFAULT_MAX_POOL_SIZE
+    );
+    this.workerBatchSize = options.workerBatchSize ?? DEFAULT_WORKER_BATCH_SIZE;
+  }
+}
+```
+
+### Concurrency Management
+
+The pool adjusts concurrency based on runtime conditions:
+
+<AccordionGroup>
+  <Accordion title="WebGPU Concurrency" icon="rocket">
+    WebGPU backend runs with **single worker** concurrency:
+    
+    ```typescript
+    if (status.selectedBackend === "webgpu") {
+      this.setConcurrency(1);
+      return;
+    }
+    ```
+    
+    This prevents GPU contention and ensures optimal performance.
+  </Accordion>
+
+  <Accordion title="WASM Concurrency" icon="gears">
+    WASM backend can use **multiple workers** (default: 2):
+    
+    - Parallelizes across CPU cores
+    - Each worker processes batches independently
+    - Dynamically adjusts on memory pressure
+  </Accordion>
+
+  <Accordion title="Automatic Downshift" icon="triangle-exclamation">
+    Pool reduces to single worker on errors:
+    
+    ```typescript
+    if (isMemoryPressureError(message) || 
+        this.errorCount >= this.downshiftErrorThreshold) {
+      this.downshiftToSingle(message);
+    }
+    ```
+    
+    Prevents cascade failures during memory constraints.
+  </Accordion>
+</AccordionGroup>
+
+## Embedding Generation
+
+The `Embedder` class manages individual worker instances:
+
+```typescript Embedder Class
+export class Embedder {
+  private worker: Worker;
+  private pending = new Map<string, PendingJob>();
+  private preferredBackend: EmbeddingBackendPreference;
+  private selectedBackend: EmbeddingBackendPreference | null = null;
+
+  async embedBatch(texts: string[]): Promise<BatchEmbeddingResultItem[]> {
+    if (texts.length === 0) {
+      return [];
+    }
+
+    const id = crypto.randomUUID();
+    return new Promise((resolve, reject) => {
+      this.pending.set(id, { resolve, reject });
+      this.worker.postMessage({ 
+        id, 
+        texts, 
+        preferredBackend: this.preferredBackend 
+      });
+    });
+  }
+
+  async embed(text: string): Promise<Float32Array> {
+    const results = await this.embedBatch([text]);
+    const first = results[0];
+    if (!first || first.error || !first.embedding) {
+      throw new Error(first?.error ?? "Embedding worker returned empty vector");
+    }
+    return first.embedding;
+  }
+}
+```
+
+### Vector Format
+
+Embeddings are 384-dimensional L2-normalized vectors:
+
+```typescript Vector Operations
+export function l2Normalize(vec: Float32Array): Float32Array {
+  let sumSquares = 0;
+  for (let i = 0; i < vec.length; i += 1) {
+    sumSquares += vec[i] * vec[i];
+  }
+
+  const norm = Math.sqrt(sumSquares);
+  if (norm === 0) {
+    return vec.slice();
+  }
+
+  const out = new Float32Array(vec.length);
+  for (let i = 0; i < vec.length; i += 1) {
+    out[i] = vec[i] / norm;
+  }
+  return out;
+}
+
+export function float32ToBlob(vec: Float32Array): Uint8Array {
+  const normalized = l2Normalize(vec);
+  const bytes = new Uint8Array(normalized.length * Float32Array.BYTES_PER_ELEMENT);
+  new Float32Array(bytes.buffer).set(normalized);
+  return bytes;
+}
+```
+
+<Info>
+  Vectors are stored as BLOBs in SQLite for efficient storage and retrieval.
+</Info>
+
+## Checkpointing
+
+Progress is saved periodically to prevent data loss:
+
+```typescript Checkpoint Policy
+const DEFAULT_EMBEDDING_CHECKPOINT_EVERY_EMBEDDINGS = 256;
+const DEFAULT_EMBEDDING_CHECKPOINT_EVERY_MS = 3000;
+
+type EmbeddingCheckpointPolicy = {
+  everyEmbeddings: number;  // Checkpoint every N embeddings
+  everyMs: number;           // Checkpoint every N milliseconds
+};
+
+private shouldCheckpointEmbeddings(now: number): boolean {
+  if (this.pendingEmbeddingsSinceCheckpoint <= 0) {
+    return false;
+  }
+
+  if (this.pendingEmbeddingsSinceCheckpoint >= this.embeddingCheckpointPolicy.everyEmbeddings) {
+    return true;
+  }
+
+  const checkpointBaseline = this.lastEmbeddingCheckpointAt ?? this.pendingEmbeddingsStartedAt;
+  return now - checkpointBaseline >= this.embeddingCheckpointPolicy.everyMs;
+}
+```
+
+<CardGroup cols={2}>
+  <Card title="Count-Based" icon="hashtag">
+    Checkpoint every 256 embeddings by default
+    
+    Ensures regular saves during bulk processing
+  </Card>
+
+  <Card title="Time-Based" icon="clock">
+    Checkpoint every 3 seconds by default
+    
+    Prevents long gaps without saves
+  </Card>
+</CardGroup>
+
+## Performance Metrics
+
+Real-time metrics track embedding performance:
+
+```typescript Embedding Metrics
+type EmbeddingRunMetrics = {
+  backendIdentity: string;              // "webgpu" or "wasm"
+  configuredPoolSize: number;           // Configured workers
+  activePoolSize: number;               // Active workers
+  poolDownshifted: boolean;             // Reduced to 1 worker?
+  batchCount: number;                   // Batches processed
+  embeddingsProcessed: number;          // Total embeddings
+  embeddingsPerSecond: number;          // Throughput
+  avgBatchEmbedLatencyMs: number;       // Average batch time
+  lastBatchEmbedLatencyMs: number;      // Last batch time
+  avgDbCheckpointMs: number;            // Average save time
+  queueDepth: number;                   // Pending chunks
+  peakQueueDepth: number;               // Max queue depth
+};
+```
+
+### Expected Performance
+
+| Backend | Workers | Chunks/Second | 1000 Chunks |
+|---------|---------|---------------|-------------|
+| WebGPU  | 1       | 40-60         | ~20s        |
+| WASM    | 2       | 15-25         | ~50s        |
+| WASM    | 1       | 8-12          | ~100s       |
+
+<Warning>
+  Performance varies significantly based on device hardware and browser.
+</Warning>
+
+## Storage
+
+Embeddings are stored in SQLite with optimized schema:
+
+```sql Embeddings Table
+CREATE TABLE embeddings (
+  id TEXT PRIMARY KEY,
+  chunk_id TEXT NOT NULL,
+  model TEXT NOT NULL,
+  dimension INTEGER NOT NULL,
+  vector_blob BLOB NOT NULL,
+  created_at INTEGER NOT NULL,
+  FOREIGN KEY (chunk_id) REFERENCES chunks(id) ON DELETE CASCADE
+);
+
+CREATE INDEX idx_embeddings_chunk_id ON embeddings(chunk_id);
+```
+
+### Storage Backends
+
+<Tabs>
+  <Tab title="OPFS (Preferred)">
+    **Origin Private File System**
+    
+    - Fast file-based storage
+    - Supports large databases
+    - Available in modern browsers
+    - Better performance than localStorage
+  </Tab>
+
+  <Tab title="localStorage (Fallback)">
+    **Browser Local Storage**
+    
+    - Base64-encoded database
+    - 5-10MB quota limit
+    - Synchronous API (slower)
+    - Universal compatibility
+  </Tab>
+
+  <Tab title="Memory (Last Resort)">
+    **In-Memory Only**
+    
+    - No persistence
+    - Used when quota exceeded
+    - Data lost on refresh
+    - Degraded experience
+  </Tab>
+</Tabs>
+
+## Error Handling
+
+Robust error handling prevents cascade failures:
+
+<AccordionGroup>
+  <Accordion title="Memory Pressure" icon="memory">
+    ```typescript
+    function isMemoryPressureError(errorMessage: string | null): boolean {
+      if (!errorMessage) return false;
+      const normalized = errorMessage.toLowerCase();
+      return (
+        normalized.includes("out of memory") ||
+        normalized.includes("oom") ||
+        normalized.includes("allocation failed")
+      );
+    }
+    ```
+    
+    **Response**: Downshift to single worker, reduce batch size
+  </Accordion>
+
+  <Accordion title="Network Errors" icon="wifi">
+    Model download failures are reported with actionable guidance:
+    
+    - Check internet connection
+    - Verify CSP allows Hugging Face CDN
+    - Retry with exponential backoff
+  </Accordion>
+
+  <Accordion title="Worker Failures" icon="triangle-exclamation">
+    Individual worker failures don't stop the pool:
+    
+    - Failed batches are retried
+    - Error count tracked per worker
+    - Pool downshifts after threshold
+  </Accordion>
+</AccordionGroup>
+
+## Alternative: Ollama Embeddings
+
+For users who prefer local models with more control:
+
+```typescript Ollama Client
+class OllamaEmbeddingClient {
+  async embed(text: string): Promise<Float32Array> {
+    const response = await fetch(`${this.baseUrl}/api/embeddings`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: this.model,
+        prompt: text
+      })
+    });
+
+    const data = await response.json();
+    return Float32Array.from(data.embedding);
+  }
+}
+```
+
+<CardGroup cols={2}>
+  <Card title="Browser Embeddings" icon="browser">
+    **Pros**:
+    - No setup required
+    - Works immediately
+    - Cross-platform
+    
+    **Cons**:
+    - Fixed model
+    - Browser limitations
+  </Card>
+
+  <Card title="Ollama Embeddings" icon="server">
+    **Pros**:
+    - Choose your model
+    - Better performance
+    - More control
+    
+    **Cons**:
+    - Requires installation
+    - Desktop only
+  </Card>
+</CardGroup>
+
+## Best Practices
+
+<Steps>
+  <Step title="Batch Processing">
+    Process repositories in batches rather than one-by-one
+    
+    Reduces overhead and improves throughput
+  </Step>
+  
+  <Step title="Monitor Metrics">
+    Watch embedding speed and queue depth
+    
+    Slow speeds may indicate memory pressure or network issues
+  </Step>
+  
+  <Step title="Checkpoint Regularly">
+    Use default checkpoint policy or more frequent for safety
+    
+    Prevents loss of hours of indexing work
+  </Step>
+  
+  <Step title="Clear on Model Change">
+    Delete embeddings if switching embedding models
+    
+    Different models produce incompatible vectors
+  </Step>
+</Steps>
+
+## Related Features
+
+<CardGroup cols={3}>
+  <Card title="Semantic Search" icon="magnifying-glass" href="/features/semantic-search">
+    Use embeddings to find repositories by meaning
+  </Card>
+  
+  <Card title="Local LLM" icon="brain" href="/features/local-llm">
+    Run language models in the browser like embeddings
+  </Card>
+  
+  <Card title="Chat Sessions" icon="comments" href="/features/chat-sessions">
+    Interact with search results using LLMs
+  </Card>
+</CardGroup>

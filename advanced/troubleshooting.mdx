@@ -1,0 +1,726 @@
+---
+title: Troubleshooting
+description: Common issues and solutions for GitStarRecall
+---
+
+## Authentication Issues
+
+<AccordionGroup>
+  <Accordion title="PAT 401 / Authentication Errors">
+    **Symptoms:**
+    - "401 Unauthorized" when fetching stars
+    - "Bad credentials" error message
+    - Token validation fails
+
+    **Solutions:**
+
+    1. **Use raw token only**
+       - Paste token directly without `Bearer ` prefix
+       - No quotes, no extra whitespace
+
+    2. **Verify token scopes**
+       - Required: `public_repo` or `repo` (for private stars)
+       - Optional: `read:user` (for user profile)
+       - Check scopes at: https://github.com/settings/tokens
+
+    3. **Check token expiration**
+       - Classic tokens can expire
+       - Fine-grained tokens have explicit expiration dates
+       - Generate new token if expired
+
+    4. **Verify repository access**
+       - Fine-grained tokens require explicit repository access
+       - Classic tokens with `repo` scope have full access
+       - For private repos, ensure token has appropriate permissions
+
+    5. **Test token manually**
+       ```bash
+       curl -H "Authorization: token YOUR_TOKEN" \
+         https://api.github.com/user/starred
+       ```
+  </Accordion>
+
+  <Accordion title="OAuth Callback 404 Error">
+    **Symptoms:**
+    - After GitHub login, redirected to 404 page
+    - URL is correct but page doesn't load
+    - "Cannot GET /auth/callback" error
+
+    **Solutions:**
+
+    1. **Verify callback URL in GitHub OAuth app**
+       - Go to: https://github.com/settings/developers
+       - Check "Authorization callback URL"
+       - Must match exactly:
+         - Local: `http://localhost:5173/auth/callback`
+         - Production: `https://yourdomain.com/auth/callback`
+
+    2. **Check environment variables**
+       ```bash
+       # Client-side (VITE_* vars)
+       VITE_GITHUB_REDIRECT_URI=http://localhost:5173/auth/callback
+       
+       # Server-side (for OAuth exchange)
+       GITHUB_OAUTH_REDIRECT_URI=http://localhost:5173/auth/callback
+       ```
+       - Both must match GitHub app callback URL
+       - Protocol (http/https) must match
+       - Port must match (if applicable)
+
+    3. **Ensure SPA fallback routing (production)**
+       - Vercel: Check `vercel.json` has SPA rewrite
+       - Netlify: Check `_redirects` or `netlify.toml`
+       - Other hosts: Configure to serve `index.html` for all routes
+
+       Example `vercel.json`:
+       ```json
+       {
+         "rewrites": [
+           { "source": "/(.*)", "destination": "/index.html" }
+         ]
+       }
+       ```
+
+    4. **Clear browser cache**
+       - OAuth can cache redirects
+       - Try in incognito/private window
+       - Clear site data in DevTools
+  </Accordion>
+
+  <Accordion title="OAuth Exchange Fails">
+    **Symptoms:**
+    - "Failed to exchange code for token" error
+    - OAuth callback succeeds but no token received
+    - Network error during exchange
+
+    **Solutions:**
+
+    1. **Check server-side environment variables**
+       ```bash
+       GITHUB_OAUTH_CLIENT_ID=your_client_id
+       GITHUB_OAUTH_CLIENT_SECRET=your_client_secret
+       GITHUB_OAUTH_REDIRECT_URI=https://yourdomain.com/auth/callback
+       ```
+       - Client ID must match GitHub OAuth app
+       - Client secret must be correct (never expose in frontend)
+       - Redirect URI must match exactly
+
+    2. **Verify exchange endpoint is deployed**
+       - Check: `/api/github/oauth/exchange` is accessible
+       - Test manually:
+         ```bash
+         curl -X POST https://yourdomain.com/api/github/oauth/exchange \
+           -H "Content-Type: application/json" \
+           -d '{"code":"test"}'
+         ```
+       - Should return 400 or 401, not 404
+
+    3. **Check CORS configuration**
+       - Exchange endpoint must allow requests from your domain
+       - Vercel/Netlify serverless functions handle CORS automatically
+       - Custom backends may need CORS headers
+
+    4. **Review server logs**
+       - Check for errors in OAuth exchange function
+       - Look for GitHub API errors
+       - Verify client secret is being read correctly
+  </Accordion>
+</AccordionGroup>
+
+## Indexing and Search Issues
+
+<AccordionGroup>
+  <Accordion title="Slow Embedding Performance">
+    **Symptoms:**
+    - Indexing takes very long time
+    - UI freezes during embedding
+    - Browser tab becomes unresponsive
+
+    **Solutions:**
+
+    1. **Reduce worker pool size**
+       ```bash
+       VITE_EMBEDDING_POOL_SIZE=1
+       ```
+       - Default is 2 workers
+       - Use 1 worker on memory-constrained systems
+       - Reduces parallel load
+
+    2. **Adjust batch size**
+       ```bash
+       VITE_EMBEDDING_WORKER_BATCH_SIZE=8
+       ```
+       - Default is adaptive (8-32, target 16)
+       - Lower values reduce memory spikes
+       - Try 8 or 12 for slower devices
+
+    3. **Switch to WASM backend**
+       ```bash
+       VITE_EMBEDDING_BACKEND_PREFERRED=wasm
+       ```
+       - Default is `webgpu` (faster but less stable)
+       - WASM is slower but more compatible
+       - Use if WebGPU causes crashes
+
+    4. **Enable large-library mode manually**
+       ```bash
+       VITE_EMBEDDING_LARGE_LIBRARY_MODE=1
+       VITE_EMBEDDING_LARGE_LIBRARY_THRESHOLD=300
+       ```
+       - Auto-enables at 500 repos
+       - Lower threshold for slower machines
+       - Prioritizes high-value repos first
+
+    5. **Check indexing telemetry in UI**
+       - Backend selection reason
+       - Throughput (chunks/sec)
+       - Checkpoint frequency
+       - Queue depth
+       - Worker pool downshift events
+  </Accordion>
+
+  <Accordion title="No Search Results">
+    **Symptoms:**
+    - Search returns zero results
+    - Know matching repos exist
+    - Indexing completed successfully
+
+    **Solutions:**
+
+    1. **Verify embeddings exist**
+       - Check embedding count in UI
+       - Should be > 0 after indexing completes
+       - If 0, indexing may have failed silently
+
+    2. **Check chunk count**
+       - Chunks should exist for indexed repos
+       - If chunks = 0, README fetching may have failed
+       - Try "Fetch Stars" again
+
+    3. **Verify query embedding**
+       - Query must be embedded before search
+       - Check browser console for embedding errors
+       - Try shorter or simpler query
+
+    4. **Check for model mismatch**
+       - If you switched embedding models, old embeddings are incompatible
+       - Solution: "Delete local data" and re-index
+
+    5. **Verify vector index cache**
+       - Cache rebuilds automatically when embedding count changes
+       - If stale, try refreshing page
+       - Check browser console for cache errors
+
+    6. **Try exact repository name**
+       - Test search with known repo name
+       - If exact name works but semantic doesn't, check embedding quality
+  </Accordion>
+
+  <Accordion title="Indexing Interrupted / Resume Not Working">
+    **Symptoms:**
+    - Closed browser during indexing
+    - Indexing restarts from beginning
+    - Resume cursor not saved
+
+    **Solutions:**
+
+    1. **Check storage mode**
+       - Resume only works with OPFS or localStorage
+       - Memory-only mode loses resume state on close
+       - Verify storage mode in Settings
+
+    2. **Verify checkpoint policy**
+       - Checkpoints save resume cursor
+       - Default: every 256 embeddings or 3000ms
+       - If closed between checkpoints, some progress lost
+
+    3. **Check `index_meta` table**
+       - Resume cursor stored in `large_library_cursor` key
+       - Query:
+         ```sql
+         SELECT value FROM index_meta 
+         WHERE key = 'large_library_cursor';
+         ```
+       - If missing, resume not enabled
+
+    4. **Enable large-library mode**
+       - Resume requires large-library mode
+       - Auto-enables at 500 repos
+       - Manually enable:
+         ```bash
+         VITE_EMBEDDING_LARGE_LIBRARY_MODE=1
+         ```
+
+    5. **Force checkpoint before closing**
+       - Wait for checkpoint indicator in UI
+       - Don't close during active embedding batch
+  </Accordion>
+
+  <Accordion title="README Fetch Failures">
+    **Symptoms:**
+    - Many repos show "README missing"
+    - GitHub API rate limit errors
+    - Partial indexing results
+
+    **Solutions:**
+
+    1. **Check GitHub API rate limit**
+       - Authenticated: 5,000 requests/hour
+       - Unauthenticated: 60 requests/hour
+       - Check remaining:
+         ```bash
+         curl -H "Authorization: token YOUR_TOKEN" \
+           https://api.github.com/rate_limit
+         ```
+
+    2. **Wait for rate limit reset**
+       - Rate limit resets every hour
+       - App automatically retries with backoff
+       - Indexing will resume when limit resets
+
+    3. **Enable batched README pipeline**
+       ```bash
+       VITE_README_BATCH_PIPELINE_V2=1
+       ```
+       - Improves throughput with adaptive concurrency
+       - Better rate limit handling
+
+    4. **Adjust batch size**
+       ```bash
+       VITE_README_BATCH_SIZE=20
+       ```
+       - Default is 40
+       - Lower value = more conservative API usage
+
+    5. **Check for deleted/private repos**
+       - Repos may have been deleted since starring
+       - Private repos require appropriate token scopes
+       - App skips these and continues
+  </Accordion>
+</AccordionGroup>
+
+## Storage and Data Issues
+
+<AccordionGroup>
+  <Accordion title="localStorage Quota Exceeded">
+    **Symptoms:**
+    - "QuotaExceededError" in console
+    - App switches to memory-only mode
+    - Data lost on refresh
+
+    **Solutions:**
+
+    1. **Check if OPFS available**
+       - OPFS has much larger quota than localStorage
+       - Check browser compatibility:
+         - Chrome 102+ ✅
+         - Firefox 111+ ✅
+         - Safari 15.2+ ✅
+       - Update browser if outdated
+
+    2. **Clear old localStorage data**
+       - Open DevTools → Application → Local Storage
+       - Remove old GitStarRecall data
+       - Refresh page
+
+    3. **Reduce database size**
+       - "Delete local data" in Settings
+       - Re-index with fewer stars
+       - Consider un-starring unused repos
+
+    4. **Request persistent storage**
+       ```javascript
+       if (navigator.storage?.persist) {
+         const granted = await navigator.storage.persist();
+       }
+       ```
+       - Increases quota in some browsers
+       - User must grant permission
+
+    5. **Use incremental sync**
+       - Don't clear data before re-indexing
+       - Use "Fetch Stars" to update only changed repos
+       - Preserves existing embeddings
+  </Accordion>
+
+  <Accordion title="/app Refresh 404 in Production">
+    **Symptoms:**
+    - `/app` loads initially but 404 on refresh
+    - Direct navigation to `/app` fails
+    - Other routes also 404
+
+    **Solutions:**
+
+    1. **Configure SPA fallback (Vercel)**
+       
+       Create/update `vercel.json`:
+       ```json
+       {
+         "rewrites": [
+           { "source": "/(.*)", "destination": "/index.html" }
+         ]
+       }
+       ```
+
+    2. **Configure SPA fallback (Netlify)**
+       
+       Create `_redirects` in `public/`:
+       ```
+       /*    /index.html   200
+       ```
+       
+       Or `netlify.toml`:
+       ```toml
+       [[redirects]]
+         from = "/*"
+         to = "/index.html"
+         status = 200
+       ```
+
+    3. **Configure SPA fallback (Nginx)**
+       ```nginx
+       location / {
+         try_files $uri $uri/ /index.html;
+       }
+       ```
+
+    4. **Configure SPA fallback (Apache)**
+       
+       Create `.htaccess`:
+       ```apache
+       <IfModule mod_rewrite.c>
+         RewriteEngine On
+         RewriteBase /
+         RewriteRule ^index\.html$ - [L]
+         RewriteCond %{REQUEST_FILENAME} !-f
+         RewriteCond %{REQUEST_FILENAME} !-d
+         RewriteRule . /index.html [L]
+       </IfModule>
+       ```
+
+    5. **Verify build output**
+       - Check `dist/` folder has `index.html`
+       - Ensure assets are in correct paths
+       - Test locally with `pnpm preview`
+  </Accordion>
+
+  <Accordion title="Data Lost After Browser Update">
+    **Symptoms:**
+    - All repos and chats disappeared
+    - Storage mode changed
+    - Had to re-index everything
+
+    **Solutions:**
+
+    1. **Check chat backup**
+       - Chat data backed up to IndexedDB
+       - Should survive most updates
+       - Load backup:
+         ```javascript
+         import { loadChatBackup } from './db/chatBackup';
+         const backup = await loadChatBackup();
+         ```
+
+    2. **Request persistent storage**
+       - Prevents browser from clearing data
+       - Must do before data loss
+       - User grants permission via prompt
+
+    3. **Export database periodically**
+       - Future feature: manual export/import
+       - Current workaround: IndexedDB chat backup
+
+    4. **Check browser data clearing settings**
+       - Some browsers clear on exit
+       - Some clear after inactivity
+       - Disable automatic clearing for important sites
+
+    5. **Use multiple browsers**
+       - Index in different browsers
+       - Acts as manual backup
+       - Not ideal but works in emergency
+  </Accordion>
+
+  <Accordion title="Chat Sessions Not Persisting">
+    **Symptoms:**
+    - Chat history lost on refresh
+    - Sessions disappear
+    - Can't resume conversations
+
+    **Solutions:**
+
+    1. **Check storage mode**
+       - Memory-only mode doesn't persist chats
+       - Need OPFS or localStorage
+       - See [localStorage Quota Exceeded](#localstorage-quota-exceeded)
+
+    2. **Verify chat backup working**
+       - Check IndexedDB in DevTools
+       - Database: `gitstarrecall-chat-backup`
+       - Should have `chat_sessions` and `chat_messages` stores
+
+    3. **Check chat table schema**
+       - App auto-heals corrupt chat tables
+       - Check browser console for migration errors
+       - If persistent, try "Delete local data" and re-index
+
+    4. **Verify foreign key constraints**
+       - Messages require valid session ID
+       - Orphaned messages are deleted
+       - Check console for FK errors
+
+    5. **Check localStorage fallback**
+       - If IndexedDB fails, uses localStorage
+       - Keys:
+           - `gitstarrecall.chat.backup.sessions.v1`
+           - `gitstarrecall.chat.backup.messages.v1`
+       - Check in DevTools → Application → Local Storage
+  </Accordion>
+</AccordionGroup>
+
+## LLM and Provider Issues
+
+<AccordionGroup>
+  <Accordion title="WebLLM Suggests Wrong Model">
+    **Symptoms:**
+    - Strong desktop suggested 360M model
+    - Mobile suggested 1B model
+    - Recommendation doesn't match device
+
+    **Solutions:**
+
+    1. **Check recommendation diagnostics**
+       - Shown in chat provider settings
+       - Fields:
+         - `reason`: Why model was chosen
+         - `webgpu`: WebGPU availability
+         - `cores`: CPU core count
+         - `mem`: Device memory (GB)
+         - `perf`: Performance probe result
+
+    2. **Safari/macOS memory detection**
+       - `navigator.deviceMemory` not available on Safari
+       - Missing memory treated as neutral, not weak
+       - This is correct behavior
+
+    3. **Manual model selection**
+       - Override recommendation in settings
+       - Available models:
+         - Llama-3.2-1B (recommended for desktop)
+         - SmolLM2-360M (recommended for mobile)
+         - Qwen2.5-1.5B
+         - Gemma-2-2B
+         - Hermes-3-Llama-3-3B
+         - Llama-3.1-3B
+
+    4. **Performance probe timeout**
+       - Slow probe → weak device classification
+       - May not reflect actual GPU capability
+       - Try manual selection if mis-classified
+
+    5. **WebGPU unavailable**
+       - Falls back to 360M automatically
+       - WASM CPU is slow for 1B models
+       - Correct behavior for compatibility
+  </Accordion>
+
+  <Accordion title="Ollama Connection Failed">
+    **Symptoms:**
+    - "Ollama not available" error
+    - Connection test fails
+    - Embeddings or chat don't work
+
+    **Solutions:**
+
+    1. **Verify Ollama is running**
+       ```bash
+       # Check Ollama status
+       ollama list
+       
+       # Start Ollama if not running
+       ollama serve
+       ```
+
+    2. **Enable CORS**
+       ```bash
+       # Required for browser access
+       export OLLAMA_ORIGINS="*"
+       ollama serve
+       ```
+       - Ollama blocks browser requests by default
+       - Must set CORS before starting
+
+    3. **Check endpoint URL**
+       - Default: `http://localhost:11434`
+       - Must be localhost/127.0.0.1/[::1]
+       - App rejects non-local endpoints for security
+
+    4. **Pull required model**
+       ```bash
+       # For embeddings
+       ollama pull nomic-embed-text
+       
+       # For chat
+       ollama pull llama2
+       ```
+       - Model must be downloaded before use
+       - Check available models: `ollama list`
+
+    5. **Test connection manually**
+       ```bash
+       # Test embeddings endpoint
+       curl http://localhost:11434/api/embed \
+         -d '{"model":"nomic-embed-text","input":"test"}'
+       
+       # Test chat endpoint
+       curl http://localhost:11434/api/chat \
+         -d '{"model":"llama2","messages":[{"role":"user","content":"hi"}]}'
+       ```
+
+    6. **Check firewall**
+       - Localhost should bypass firewall
+       - If using Docker, ensure port mapping correct
+       - Try `127.0.0.1` instead of `localhost`
+  </Accordion>
+
+  <Accordion title="Remote LLM API Errors">
+    **Symptoms:**
+    - "API key invalid" errors
+    - 401/403 from LLM provider
+    - Requests timing out
+
+    **Solutions:**
+
+    1. **Verify API key**
+       - Check key starts with correct prefix:
+         - OpenAI: `sk-`
+         - Anthropic: `sk-ant-`
+       - No extra whitespace
+       - Key not expired
+
+    2. **Check provider status**
+       - OpenAI: https://status.openai.com
+       - Anthropic: https://status.anthropic.com
+       - Outages affect all users
+
+    3. **Verify rate limits**
+       - Free tiers have low limits
+       - Check provider dashboard for usage
+       - Wait if limit exceeded
+
+    4. **Check CORS (browser requests)**
+       - Direct browser → API requests may fail CORS
+       - Use proxy/backend if provider doesn't allow CORS
+       - App uses backend for OAuth, can extend for LLM
+
+    5. **Inspect network tab**
+       - Open DevTools → Network
+       - Find failed request
+       - Check request headers and response
+       - Look for specific error message
+
+    6. **Test API key manually**
+       ```bash
+       # OpenAI
+       curl https://api.openai.com/v1/models \
+         -H "Authorization: Bearer YOUR_KEY"
+       
+       # Anthropic
+       curl https://api.anthropic.com/v1/messages \
+         -H "x-api-key: YOUR_KEY" \
+         -H "anthropic-version: 2023-06-01" \
+         -d '{"model":"claude-3-sonnet-20240229","max_tokens":1024,"messages":[{"role":"user","content":"Hi"}]}'
+       ```
+  </Accordion>
+</AccordionGroup>
+
+## Performance Issues
+
+<AccordionGroup>
+  <Accordion title="Browser Tab Freezing">
+    **Symptoms:**
+    - Tab becomes unresponsive
+    - UI freezes during indexing
+    - Can't click buttons or scroll
+
+    **Solutions:**
+
+    1. **Reduce worker pool size**
+       ```bash
+       VITE_EMBEDDING_POOL_SIZE=1
+       ```
+
+    2. **Lower batch sizes**
+       ```bash
+       VITE_EMBEDDING_WORKER_BATCH_SIZE=8
+       VITE_README_BATCH_SIZE=20
+       ```
+
+    3. **Increase UI update interval**
+       ```bash
+       VITE_EMBEDDING_UI_UPDATE_MS=1000
+       ```
+       - Default: 300ms
+       - Higher = less frequent UI updates = less main thread work
+
+    4. **Switch to WASM backend**
+       ```bash
+       VITE_EMBEDDING_BACKEND_PREFERRED=wasm
+       ```
+       - WebGPU can block main thread on some drivers
+       - WASM is more stable
+
+    5. **Close other tabs**
+       - Reduce overall browser memory usage
+       - Dedicate resources to GitStarRecall
+
+    6. **Use smaller model (future)**
+       - Current: `all-MiniLM-L6-v2` (384 dims)
+       - Future: Option for even smaller models
+  </Accordion>
+
+  <Accordion title="High Memory Usage">
+    **Symptoms:**
+    - Browser uses 2GB+ RAM
+    - System becomes slow
+    - Out of memory crashes
+
+    **Solutions:**
+
+    1. **Reduce worker pool**
+       - Each worker loads full model
+       - 2 workers = 2x model memory
+       - Use 1 worker to halve memory usage
+
+    2. **Lower batch sizes**
+       - Smaller batches = less in-flight data
+       - Try 8 or 12 chunks per batch
+
+    3. **Increase checkpoint frequency**
+       ```bash
+       VITE_DB_CHECKPOINT_EVERY_EMBEDDINGS=128
+       VITE_DB_CHECKPOINT_EVERY_MS=2000
+       ```
+       - Flushes data to disk more often
+       - Reduces in-memory accumulation
+
+    4. **Index in smaller batches**
+       - Don't index all 1k stars at once
+       - Clear data and re-fetch periodically
+       - Not ideal but reduces peak memory
+
+    5. **Close other applications**
+       - Free up system RAM
+       - Close unused browser tabs
+
+    6. **Upgrade device RAM**
+       - 1k+ stars with embeddings needs ~2-4GB
+       - Consider hardware upgrade if persistent issue
+  </Accordion>
+</AccordionGroup>
+
+## Related Documentation
+
+- [Architecture](/advanced/architecture) - System design and components
+- [Data Storage](/advanced/data-storage) - Storage implementation details
+- Usage Guide: `source/docs/Usage.md`

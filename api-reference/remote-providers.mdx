@@ -1,0 +1,646 @@
+---
+title: Remote LLM Providers
+description: OpenAI-compatible API providers and LM Studio
+---
+
+## Overview
+
+Remote LLM providers enable chat functionality through external APIs. The system supports any OpenAI-compatible API (OpenAI, Anthropic via proxies, OpenRouter, etc.) and local LM Studio servers.
+
+## Provider Definitions
+
+### OpenAI-Compatible
+
+From `src/llm/providers.ts:155-162`:
+
+```typescript
+{
+  id: "openai-compatible",
+  label: "Remote (OpenAI-compatible)",
+  kind: "remote",
+  defaultBaseUrl: "https://api.openai.com",
+  defaultModel: "gpt-4o-mini",
+  requiresApiKey: true,
+}
+```
+
+<ParamField path="id" type="string">
+  Provider identifier: `"openai-compatible"`
+</ParamField>
+
+<ParamField path="kind" type="string">
+  Provider type: `"remote"`
+</ParamField>
+
+<ParamField path="defaultBaseUrl" type="string">
+  Default: `"https://api.openai.com"`
+</ParamField>
+
+<ParamField path="defaultModel" type="string">
+  Default: `"gpt-4o-mini"`
+</ParamField>
+
+<ParamField path="requiresApiKey" type="boolean">
+  API key required: `true`
+</ParamField>
+
+### LM Studio
+
+From `src/llm/providers.ts:171-178`:
+
+```typescript
+{
+  id: "lmstudio",
+  label: "Local (LM Studio)",
+  kind: "local",
+  defaultBaseUrl: "http://localhost:1234",
+  defaultModel: "local-model",
+  requiresApiKey: false,
+}
+```
+
+<ParamField path="id" type="string">
+  Provider identifier: `"lmstudio"`
+</ParamField>
+
+<ParamField path="kind" type="string">
+  Provider type: `"local"` (runs on localhost)
+</ParamField>
+
+<ParamField path="defaultBaseUrl" type="string">
+  Default: `"http://localhost:1234"`
+</ParamField>
+
+<ParamField path="defaultModel" type="string">
+  Default: `"local-model"`
+</ParamField>
+
+<ParamField path="requiresApiKey" type="boolean">
+  API key required: `false`
+</ParamField>
+
+## Configuration
+
+### LLMProviderConfig
+
+From `src/llm/types.ts:22-27`:
+
+```typescript
+type LLMProviderConfig = {
+  baseUrl: string;
+  model: string;
+  apiKey?: string;
+  allowModelDownload?: boolean; // WebLLM only
+};
+```
+
+<ParamField path="baseUrl" type="string" required>
+  API base URL (e.g., `"https://api.openai.com"`)
+</ParamField>
+
+<ParamField path="model" type="string" required>
+  Model identifier (e.g., `"gpt-4o-mini"`, `"claude-3-5-sonnet-20241022"`)
+</ParamField>
+
+<ParamField path="apiKey" type="string">
+  API key for authentication. Required for remote providers.
+</ParamField>
+
+<ParamField path="allowModelDownload" type="boolean">
+  Only used by WebLLM provider. Ignored for remote/LM Studio.
+</ParamField>
+
+### LLMStreamRequest
+
+From `src/llm/types.ts:14-20`:
+
+```typescript
+type LLMStreamRequest = {
+  prompt: string;
+  contextSnippets: string[];
+  signal: AbortSignal;
+  onToken: (token: string) => void;
+  onInitProgress?: (progress: number, text: string) => void;
+};
+```
+
+<ParamField path="prompt" type="string" required>
+  User query or prompt
+</ParamField>
+
+<ParamField path="contextSnippets" type="string[]" required>
+  Context chunks to include (max 8 used, see `TOP_K_LIMIT`)
+</ParamField>
+
+<ParamField path="signal" type="AbortSignal" required>
+  Abort signal to cancel the request
+</ParamField>
+
+<ParamField path="onToken" type="(token: string) => void" required>
+  Callback invoked for each streamed token
+</ParamField>
+
+<ParamField path="onInitProgress" type="(progress: number, text: string) => void">
+  Progress callback (WebLLM only, ignored by remote providers)
+</ParamField>
+
+## Streaming API
+
+### OpenAI-Compatible Stream
+
+From `src/llm/providers.ts:190-212`:
+
+```typescript
+import { getProviderById } from './llm/providers';
+import type { LLMProviderConfig, LLMStreamRequest } from './llm/types';
+
+const provider = getProviderById('openai-compatible');
+
+const config: LLMProviderConfig = {
+  baseUrl: 'https://api.openai.com',
+  model: 'gpt-4o-mini',
+  apiKey: process.env.OPENAI_API_KEY,
+};
+
+const controller = new AbortController();
+
+const request: LLMStreamRequest = {
+  prompt: 'Explain semantic search',
+  contextSnippets: [
+    'Semantic search uses embeddings...',
+    'Vector databases store embeddings...',
+  ],
+  signal: controller.signal,
+  onToken: (token) => {
+    process.stdout.write(token);
+  },
+};
+
+await provider.stream(config, request);
+```
+
+**Endpoint:** `POST {baseUrl}/v1/chat/completions`
+
+**Request Headers:**
+```json
+{
+  "Content-Type": "application/json",
+  "Authorization": "Bearer YOUR_API_KEY"
+}
+```
+
+**Request Body:**
+```json
+{
+  "model": "gpt-4o-mini",
+  "stream": true,
+  "messages": [
+    {
+      "role": "system",
+      "content": "You are a recommendation assistant for GitHub starred repositories. Use only provided context and be concise."
+    },
+    {
+      "role": "user",
+      "content": "Explain semantic search\n\nContext 1:\nSemantic search uses embeddings...\n\nContext 2:\nVector databases store embeddings..."
+    }
+  ]
+}
+```
+
+**Response:** Server-Sent Events (SSE)
+
+From `src/llm/providers.ts:31-80`:
+
+```
+data: {"choices":[{"delta":{"content":"Semantic"}}]}
+
+data: {"choices":[{"delta":{"content":" search"}}]}
+
+data: {"choices":[{"delta":{"content":" is"}}]}
+
+data: [DONE]
+```
+
+### LM Studio Stream
+
+From `src/llm/providers.ts:237-259`:
+
+```typescript
+const provider = getProviderById('lmstudio');
+
+const config: LLMProviderConfig = {
+  baseUrl: 'http://localhost:1234',
+  model: 'local-model', // Model name from LM Studio
+  // No apiKey needed
+};
+
+const request: LLMStreamRequest = {
+  prompt: 'What are vector embeddings?',
+  contextSnippets: [],
+  signal: new AbortController().signal,
+  onToken: (token) => console.log(token),
+};
+
+await provider.stream(config, request);
+```
+
+**Endpoint:** `POST http://localhost:1234/v1/chat/completions`
+
+**Request Format:** Same as OpenAI-compatible (no Authorization header)
+
+**Response:** Server-Sent Events (SSE) - same parsing logic
+
+## Message Building
+
+From `src/llm/providers.ts:135-147`:
+
+```typescript
+function buildMessages(prompt: string, snippets: string[]): ProviderMessage[] {
+  return [
+    {
+      role: "system",
+      content:
+        "You are a recommendation assistant for GitHub starred repositories. Use only provided context and be concise.",
+    },
+    {
+      role: "user",
+      content: `${prompt}\n\n${buildContextBlock(snippets)}`,
+    },
+  ];
+}
+```
+
+### Context Formatting
+
+From `src/llm/providers.ts:16-21`:
+
+```typescript
+const TOP_K_LIMIT = 8;
+
+function buildContextBlock(snippets: string[]): string {
+  return snippets
+    .slice(0, TOP_K_LIMIT)
+    .map((snippet, index) => `Context ${index + 1}:\n${snippet}`)
+    .join("\n\n");
+}
+```
+
+**Example Output:**
+```
+Context 1:
+First snippet content here...
+
+Context 2:
+Second snippet content here...
+
+Context 3:
+Third snippet content here...
+```
+
+Only the **first 8 snippets** are included.
+
+## Stream Parsing
+
+### SSE Parser
+
+From `src/llm/providers.ts:31-80`:
+
+```typescript
+async function parseSseStream(
+  response: Response,
+  onToken: (token: string) => void,
+): Promise<void> {
+  if (!response.body) {
+    throw new Error("Streaming response body is not available");
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split("\n");
+    buffer = lines.pop() ?? "";
+
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed.startsWith("data:")) continue;
+
+      const raw = trimmed.slice(5).trim();
+      if (raw === "[DONE]") return;
+      if (!raw) continue;
+
+      try {
+        const payload = JSON.parse(raw);
+        const token =
+          payload.choices?.[0]?.delta?.content ??
+          payload.choices?.[0]?.message?.content;
+
+        if (token) {
+          onToken(token);
+        }
+      } catch {
+        // Skip malformed SSE lines without killing the stream
+      }
+    }
+  }
+}
+```
+
+**Extracts tokens from:**
+- `choices[0].delta.content` (streaming format)
+- `choices[0].message.content` (alternative format)
+
+**Handles:**
+- `data: [DONE]` - End marker
+- Malformed JSON - Skips silently
+- Empty data lines - Ignores
+
+## Error Handling
+
+### Format Provider Error
+
+From `src/llm/providers.ts:295-319`:
+
+```typescript
+import { formatProviderError } from './llm/providers';
+
+try {
+  await provider.stream(config, request);
+} catch (error) {
+  const userMessage = formatProviderError(error, selectedProvider.kind);
+  console.error(userMessage);
+}
+```
+
+**Error Messages:**
+
+<ParamField path="AbortError" type="string">
+  "Generation cancelled."
+</ParamField>
+
+<ParamField path="Failed to fetch" type="string" default="local">
+  "Local provider unreachable. Ensure Ollama/LM Studio is running and CORS/network access allows localhost calls."
+</ParamField>
+
+<ParamField path="NetworkError" type="string" default="local">
+  "Local provider unreachable. Ensure Ollama/LM Studio is running and CORS/network access allows localhost calls."
+</ParamField>
+
+<ParamField path="Other errors" type="string">
+  Returns the original error message
+</ParamField>
+
+### HTTP Error Handling
+
+From `src/llm/providers.ts:207-209`:
+
+```typescript
+if (!response.ok) {
+  throw new Error(`Provider request failed (${response.status})`);
+}
+```
+
+No automatic retry logic - errors propagate immediately.
+
+## Provider Selection
+
+### Get Provider Definitions
+
+```typescript
+import { getProviderDefinitions } from './llm/providers';
+
+const providers = getProviderDefinitions();
+// LLMProviderDefinition[]
+
+providers.forEach((provider) => {
+  console.log(`${provider.label}: ${provider.id}`);
+  console.log(`  Kind: ${provider.kind}`);
+  console.log(`  Default: ${provider.defaultModel}`);
+  console.log(`  Requires API Key: ${provider.requiresApiKey}`);
+});
+```
+
+**Output:**
+```
+Remote (OpenAI-compatible): openai-compatible
+  Kind: remote
+  Default: gpt-4o-mini
+  Requires API Key: true
+
+Local (Ollama): ollama
+  Kind: local
+  Default: llama3.1:8b
+  Requires API Key: false
+
+Local (LM Studio): lmstudio
+  Kind: local
+  Default: local-model
+  Requires API Key: false
+```
+
+### Get Provider by ID
+
+```typescript
+import { getProviderById } from './llm/providers';
+import type { LLMStreamProvider } from './llm/types';
+
+const provider: LLMStreamProvider = getProviderById('openai-compatible');
+
+console.log(provider.definition.label);
+// "Remote (OpenAI-compatible)"
+
+await provider.stream(config, request);
+```
+
+## Usage Examples
+
+### OpenAI
+
+```typescript
+const config: LLMProviderConfig = {
+  baseUrl: 'https://api.openai.com',
+  model: 'gpt-4o',
+  apiKey: process.env.OPENAI_API_KEY,
+};
+```
+
+### Anthropic (via OpenAI SDK)
+
+```typescript
+const config: LLMProviderConfig = {
+  baseUrl: 'https://api.anthropic.com',
+  model: 'claude-3-5-sonnet-20241022',
+  apiKey: process.env.ANTHROPIC_API_KEY,
+};
+```
+
+Note: Requires proxy that translates to OpenAI format
+
+### OpenRouter
+
+```typescript
+const config: LLMProviderConfig = {
+  baseUrl: 'https://openrouter.ai/api',
+  model: 'anthropic/claude-3.5-sonnet',
+  apiKey: process.env.OPENROUTER_API_KEY,
+};
+```
+
+### Azure OpenAI
+
+```typescript
+const config: LLMProviderConfig = {
+  baseUrl: 'https://YOUR_RESOURCE.openai.azure.com',
+  model: 'gpt-4o',
+  apiKey: process.env.AZURE_OPENAI_API_KEY,
+};
+```
+
+Note: May require different endpoint paths
+
+### LM Studio Local
+
+```typescript
+const config: LLMProviderConfig = {
+  baseUrl: 'http://localhost:1234',
+  model: 'lmstudio-community/Meta-Llama-3.1-8B-Instruct-GGUF',
+};
+```
+
+### Cancellation
+
+```typescript
+const controller = new AbortController();
+
+const request: LLMStreamRequest = {
+  prompt: 'Long generation task...',
+  contextSnippets: [],
+  signal: controller.signal,
+  onToken: (token) => console.log(token),
+};
+
+// Start streaming
+const streamPromise = provider.stream(config, request);
+
+// Cancel after 5 seconds
+setTimeout(() => {
+  controller.abort();
+  console.log('Generation cancelled');
+}, 5000);
+
+try {
+  await streamPromise;
+} catch (error) {
+  if (error.name === 'AbortError') {
+    console.log('User cancelled generation');
+  }
+}
+```
+
+## Type Definitions
+
+### LLMProviderId
+
+From `src/llm/types.ts:3`:
+
+```typescript
+type LLMProviderId = "openai-compatible" | "ollama" | "lmstudio" | "webllm";
+```
+
+### LLMProviderDefinition
+
+From `src/llm/types.ts:5-12`:
+
+```typescript
+type LLMProviderDefinition = {
+  id: LLMProviderId;
+  label: string;
+  kind: LLMProviderKind;
+  defaultBaseUrl: string;
+  defaultModel: string;
+  requiresApiKey: boolean;
+};
+```
+
+### LLMStreamProvider
+
+From `src/llm/types.ts:29-32`:
+
+```typescript
+type LLMStreamProvider = {
+  definition: LLMProviderDefinition;
+  stream: (config: LLMProviderConfig, request: LLMStreamRequest) => Promise<void>;
+};
+```
+
+### ProviderMessage
+
+From `src/llm/providers.ts:130-133`:
+
+```typescript
+type ProviderMessage = {
+  role: "system" | "user";
+  content: string;
+};
+```
+
+Note: Assistant messages not used (streaming responses only)
+
+## Best Practices
+
+1. **Always validate API keys** before making requests
+2. **Use AbortController** for user cancellation
+3. **Handle network errors** gracefully (connection failures, timeouts)
+4. **Respect rate limits** - implement backoff for production
+5. **Validate response status** before parsing SSE
+6. **Sanitize context snippets** - limit to 8 most relevant
+7. **Test with different models** - behavior varies by provider
+8. **Set appropriate timeouts** - default fetch timeout is browser-dependent
+9. **Monitor token usage** - track costs for metered APIs
+10. **Fallback to smaller models** on errors (e.g., gpt-4o → gpt-4o-mini)
+
+## Common Issues
+
+### CORS Errors (LM Studio)
+
+Ensure LM Studio CORS settings allow your origin:
+```json
+{
+  "cors.allowedOrigins": ["http://localhost:5173"]
+}
+```
+
+### Invalid API Key
+
+```typescript
+if (!response.ok) {
+  if (response.status === 401) {
+    throw new Error('Invalid API key');
+  }
+  if (response.status === 403) {
+    throw new Error('API key lacks required permissions');
+  }
+}
+```
+
+### Rate Limiting
+
+```typescript
+if (response.status === 429) {
+  const retryAfter = response.headers.get('Retry-After');
+  throw new Error(`Rate limited. Retry after ${retryAfter}s`);
+}
+```
+
+### Model Not Found
+
+```typescript
+if (response.status === 404) {
+  throw new Error(`Model "${config.model}" not found`);
+}
+```

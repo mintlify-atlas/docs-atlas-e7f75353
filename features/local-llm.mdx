@@ -1,0 +1,550 @@
+---
+title: Local LLM (WebLLM)
+description: Run language models entirely in your browser using WebGPU and WebAssembly
+---
+
+GitStarRecall can run large language models directly in your browser using [WebLLM](https://webllm.mlc.ai/). No API keys, no cloud costs, and complete privacy.
+
+## Overview
+
+WebLLM enables running quantized LLMs in the browser using WebGPU acceleration:
+
+<CardGroup cols={2}>
+  <Card title="Privacy" icon="shield-check">
+    All inference happens locally
+    
+    Your data never leaves your device
+  </Card>
+
+  <Card title="No Cost" icon="dollar-sign">
+    One-time model download
+    
+    Unlimited usage after that
+  </Card>
+
+  <Card title="Offline" icon="wifi-slash">
+    Works without internet after download
+    
+    Perfect for air-gapped environments
+  </Card>
+
+  <Card title="WebGPU Accelerated" icon="rocket">
+    GPU acceleration via WebGPU
+    
+    Fast inference on compatible devices
+  </Card>
+</CardGroup>
+
+## Supported Models
+
+GitStarRecall includes a curated set of WebLLM models optimized for repository Q&A:
+
+```typescript Model Catalog
+export type WebLLMModelTier = "ultra-low" | "balanced" | "quality";
+
+export type WebLLMModelProfile = {
+  id: string;
+  label: string;
+  tier: WebLLMModelTier;
+  approxDownloadMB: number;
+  notes?: string;
+  experimental?: boolean;
+};
+```
+
+### Available Models
+
+<Tabs>
+  <Tab title="Balanced (Default)">
+    **Llama 3.2 1B Instruct** `Llama-3.2-1B-Instruct-q4f16_1-MLC`
+    
+    - **Download**: ~700 MB
+    - **Best for**: Desktop and laptop devices
+    - **Quality**: Good instruction following
+    - **Speed**: Fast inference
+    
+    <Info>
+      This is the default model for most users.
+    </Info>
+  </Tab>
+
+  <Tab title="Ultra-Low (Mobile)">
+    **SmolLM2 360M Instruct** `SmolLM2-360M-Instruct-q4f16_1-MLC`
+    
+    - **Download**: ~250 MB
+    - **Best for**: Mobile devices, weak hardware
+    - **Quality**: Basic comprehension
+    - **Speed**: Very fast
+    
+    <Tip>
+      Automatically selected on low-memory devices.
+    </Tip>
+  </Tab>
+
+  <Tab title="Quality">
+    Multiple higher-quality options:
+    
+    **Qwen2.5 1.5B Instruct** (~1.1 GB)
+    - Strong technical understanding
+    - Good for detailed README analysis
+    
+    **Gemma 2 2B Instruct** (~1.4 GB)
+    - Polished responses
+    - Excellent summarization
+    
+    **Llama 3.1 3B Instruct** (~1.9 GB)
+    - Highest quality
+    - Slower inference
+  </Tab>
+</Tabs>
+
+### Model Selection Logic
+
+```typescript Automatic Selection
+export function recommendWebLLMModel(): WebLLMRecommendation {
+  const memory = (navigator as NavigatorWithMemory).deviceMemory;
+  
+  // Low memory devices (≤4GB) → SmolLM2
+  if (memory && memory <= 4) {
+    return {
+      modelId: WEBLLM_FALLBACK_MODEL_ID,
+      reason: "low-memory-device"
+    };
+  }
+  
+  // Default → Llama 3.2 1B
+  return {
+    modelId: WEBLLM_PRIMARY_MODEL_ID,
+    reason: "default"
+  };
+}
+```
+
+## Engine Management
+
+WebLLM uses a singleton engine manager for efficiency:
+
+```typescript Engine Manager
+class WebLLMEngineManager {
+  private engine: MLCEngineInterface | null = null;
+  private activeModelId: string | null = null;
+  private loadingPromise: Promise<void> | null = null;
+
+  async ensureReady(
+    modelId: string,
+    options: WebLLMEnsureReadyOptions
+  ): Promise<void> {
+    // Check WebGPU support
+    if (!this.supportsWebGPU()) {
+      throw new WebLLMProviderError(
+        "WEBLLM_UNSUPPORTED",
+        "WebGPU is not available in this browser."
+      );
+    }
+
+    // Already loaded?
+    if (this.engine && this.activeModelId === modelId) {
+      return;
+    }
+
+    // Request download consent
+    if (!options.allowDownload) {
+      throw new WebLLMProviderError(
+        "WEBLLM_DOWNLOAD_REQUIRED",
+        "Model download consent is required."
+      );
+    }
+
+    // Initialize or reload
+    this.loadingPromise = (async () => {
+      if (!this.engine) {
+        this.engine = await CreateMLCEngine(modelId, {
+          initProgressCallback: (report) => {
+            const progress = Math.max(0, Math.min(1, report.progress));
+            options.onProgress?.(progress, report.text || "Preparing model");
+          },
+          logLevel: "INFO"
+        });
+        this.activeModelId = modelId;
+      } else {
+        await this.engine.reload(modelId);
+        this.activeModelId = modelId;
+      }
+    })();
+
+    await this.loadingPromise;
+    this.loadingPromise = null;
+  }
+}
+```
+
+### Download Consent
+
+Users must explicitly consent to model downloads:
+
+<Steps>
+  <Step title="Trigger Download">
+    User selects WebLLM provider and sends a message
+  </Step>
+  
+  <Step title="Show Dialog">
+    Download consent dialog appears with model size and details
+  </Step>
+  
+  <Step title="Download Progress">
+    Real-time progress updates during download and initialization
+  </Step>
+  
+  <Step title="Ready to Use">
+    Model loaded and ready for inference
+  </Step>
+</Steps>
+
+<Warning>
+  Model downloads are large (250MB - 1.9GB). Use Wi-Fi for best experience.
+</Warning>
+
+## Streaming Inference
+
+WebLLM responses stream token-by-token:
+
+```typescript Streaming
+async stream(
+  modelId: string,
+  messages: WebLLMMessage[],
+  signal: AbortSignal,
+  onToken: (token: string) => void
+): Promise<void> {
+  if (!this.engine || this.activeModelId !== modelId) {
+    throw new WebLLMProviderError(
+      "WEBLLM_INIT_FAILED",
+      "WebLLM engine is not initialized."
+    );
+  }
+
+  try {
+    const chunkStream = await this.engine.chat.completions.create({
+      model: modelId,
+      messages,
+      stream: true,
+      temperature: 0.2,
+      max_tokens: 700
+    });
+
+    for await (const chunk of chunkStream as AsyncIterable<ChatCompletionChunk>) {
+      if (signal.aborted) {
+        throw new DOMException("aborted", "AbortError");
+      }
+      const token = chunk.choices?.[0]?.delta?.content ?? "";
+      if (token.length > 0) {
+        onToken(token);
+      }
+    }
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") {
+      throw error;
+    }
+    throw new WebLLMProviderError(
+      "WEBLLM_STREAM_FAILED",
+      `WebLLM stream failed: ${error.message}`
+    );
+  }
+}
+```
+
+### Inference Parameters
+
+```typescript Generation Config
+{
+  temperature: 0.2,      // Low temperature for consistent, factual responses
+  max_tokens: 700,       // Limit response length for speed
+  stream: true           // Token-by-token streaming
+}
+```
+
+<Info>
+  Lower temperature (0.2) reduces hallucination and keeps responses grounded in provided context.
+</Info>
+
+## Browser Compatibility
+
+WebLLM requires WebGPU support:
+
+### Supported Browsers
+
+| Browser | Platform | Status |
+|---------|----------|--------|
+| Chrome 113+ | Desktop | ✅ Full support |
+| Edge 113+ | Desktop | ✅ Full support |
+| Brave 113+ | Desktop | ✅ Full support |
+| Safari 18+ | macOS | ⚠️ Experimental |
+| Firefox | Desktop | ❌ No WebGPU yet |
+| Mobile browsers | iOS/Android | ❌ Limited support |
+
+<Warning>
+  WebLLM is **not recommended for mobile devices** due to memory and performance constraints. Use remote or Ollama providers instead.
+</Warning>
+
+### WebGPU Detection
+
+```typescript Capability Check
+private supportsWebGPU(): boolean {
+  const nav = navigator as Navigator & { gpu?: object };
+  return typeof nav.gpu !== "undefined";
+}
+```
+
+If WebGPU is unavailable, GitStarRecall will:
+
+1. Show an error message
+2. Suggest using a remote provider (OpenAI)
+3. Suggest using Ollama for local inference
+
+## Download Dialog
+
+The WebLLM download dialog provides transparency:
+
+```tsx Download Dialog Component
+<WebLLMDownloadDialog
+  open={showWebLLMDownload}
+  onOpenChange={setShowWebLLMDownload}
+  onConfirm={() => {
+    setWebLLMDownloadConsent(true);
+    setShowWebLLMDownload(false);
+  }}
+  onCancel={() => {
+    setShowWebLLMDownload(false);
+  }}
+  modelProfile={selectedWebLLMModel}
+  downloadProgress={webllmDownloadProgress}
+  downloadStatus={webllmDownloadStatus}
+/>
+```
+
+### Download States
+
+<AccordionGroup>
+  <Accordion title="Requesting Consent" icon="hand">
+    - Shows model name and size
+    - Explains what will be downloaded
+    - Requires user confirmation
+  </Accordion>
+
+  <Accordion title="Downloading" icon="download">
+    - Real-time progress percentage
+    - Current operation description
+    - Cannot be cancelled (browser limitation)
+  </Accordion>
+
+  <Accordion title="Initializing" icon="gear">
+    - Loading model into GPU memory
+    - Compiling model shaders
+    - Final preparation steps
+  </Accordion>
+
+  <Accordion title="Ready" icon="circle-check">
+    - Model loaded and warmed up
+    - Ready to accept chat requests
+    - Dialog closes automatically
+  </Accordion>
+</AccordionGroup>
+
+## Performance Characteristics
+
+### Inference Speed
+
+Expected tokens per second by model and hardware:
+
+| Model | Desktop GPU | Desktop CPU | Laptop |
+|-------|-------------|-------------|--------|
+| SmolLM2 360M | 40-60 t/s | 20-30 t/s | 15-25 t/s |
+| Llama 3.2 1B | 25-40 t/s | 12-20 t/s | 10-15 t/s |
+| Qwen2.5 1.5B | 20-30 t/s | 10-15 t/s | 8-12 t/s |
+| Gemma 2 2B | 15-25 t/s | 8-12 t/s | 6-10 t/s |
+| Llama 3.1 3B | 12-20 t/s | 6-10 t/s | 4-8 t/s |
+
+<Note>
+  Performance varies significantly based on GPU, browser, and OS. These are approximate ranges.
+</Note>
+
+### Memory Usage
+
+Peak memory consumption during inference:
+
+- **SmolLM2 360M**: ~1 GB RAM
+- **Llama 3.2 1B**: ~2 GB RAM
+- **Qwen2.5 1.5B**: ~3 GB RAM
+- **Gemma 2 2B**: ~4 GB RAM
+- **Llama 3.1 3B**: ~5 GB RAM
+
+<Warning>
+  Ensure your device has sufficient available memory before downloading larger models.
+</Warning>
+
+## Error Handling
+
+WebLLM errors are categorized for better UX:
+
+```typescript Error Codes
+export type WebLLMErrorCode =
+  | "WEBLLM_UNSUPPORTED"       // WebGPU not available
+  | "WEBLLM_DOWNLOAD_REQUIRED"  // Consent needed
+  | "WEBLLM_INIT_FAILED"        // Initialization error
+  | "WEBLLM_STREAM_FAILED";     // Inference error
+
+export class WebLLMProviderError extends Error {
+  readonly code: WebLLMErrorCode;
+
+  constructor(code: WebLLMErrorCode, message: string) {
+    super(message);
+    this.name = "WebLLMProviderError";
+    this.code = code;
+  }
+}
+```
+
+### Error Messages
+
+<Tabs>
+  <Tab title="Unsupported Browser">
+    ```
+    WebLLM is unavailable in this browser/device.
+    ```
+    
+    **Solution**: Use Chrome 113+, Edge 113+, or Brave 113+ on desktop
+  </Tab>
+
+  <Tab title="Download Required">
+    ```
+    WebLLM model download requires explicit consent.
+    ```
+    
+    **Solution**: Click through the download consent dialog
+  </Tab>
+
+  <Tab title="Initialization Failed">
+    ```
+    WebLLM init failed: [detailed error]
+    ```
+    
+    **Solution**: Check console logs, try smaller model, or use remote provider
+  </Tab>
+
+  <Tab title="Stream Failed">
+    ```
+    WebLLM stream failed: [detailed error]
+    ```
+    
+    **Solution**: Refresh page, check memory usage, try again
+  </Tab>
+</Tabs>
+
+## Comparison with Alternatives
+
+<CardGroup cols={3}>
+  <Card title="WebLLM (Browser)" icon="browser">
+    **Pros**:
+    - No setup
+    - Cross-platform
+    - Completely private
+    - One-time download
+    
+    **Cons**:
+    - Requires WebGPU
+    - Large downloads
+    - Limited models
+    - Slower than desktop
+  </Card>
+
+  <Card title="Ollama (Local)" icon="server">
+    **Pros**:
+    - Better performance
+    - More model options
+    - Lower memory usage
+    - Works offline
+    
+    **Cons**:
+    - Requires installation
+    - Desktop only
+    - Manual setup
+  </Card>
+
+  <Card title="OpenAI (Remote)" icon="cloud">
+    **Pros**:
+    - Best quality
+    - Fast responses
+    - Latest models
+    - No setup
+    
+    **Cons**:
+    - Requires API key
+    - Usage costs
+    - Not private
+    - Needs internet
+  </Card>
+</CardGroup>
+
+## Best Practices
+
+<Steps>
+  <Step title="Choose Appropriate Model">
+    Start with Llama 3.2 1B (default)
+    
+    Only use larger models if you need higher quality and have sufficient memory
+  </Step>
+  
+  <Step title="Download on Wi-Fi">
+    Models are 250MB-1.9GB
+    
+    Use Wi-Fi to avoid mobile data charges
+  </Step>
+  
+  <Step title="Close Other Tabs">
+    Free up memory before loading models
+    
+    Each tab consumes memory independently
+  </Step>
+  
+  <Step title="Monitor Performance">
+    Check tokens/second during generation
+    
+    Slow performance may indicate memory pressure
+  </Step>
+</Steps>
+
+## Feature Flags
+
+WebLLM can be disabled via environment variable:
+
+```bash .env
+VITE_WEBLLM_ENABLED=true  # Enable WebLLM (default)
+VITE_WEBLLM_ENABLED=false # Disable WebLLM
+```
+
+```typescript Feature Check
+export function isWebLLMEnabled(): boolean {
+  const raw = import.meta.env.VITE_WEBLLM_ENABLED;
+  return raw === "1" || raw === "true";
+}
+```
+
+When disabled:
+- WebLLM option not shown in provider selector
+- Model catalog not loaded
+- Download dialog not rendered
+
+## Related Features
+
+<CardGroup cols={3}>
+  <Card title="Chat Sessions" icon="comments" href="/features/chat-sessions">
+    Use WebLLM to chat about search results
+  </Card>
+  
+  <Card title="Local Embeddings" icon="microchip" href="/features/embeddings">
+    Generate embeddings with WebGPU like WebLLM
+  </Card>
+  
+  <Card title="Semantic Search" icon="magnifying-glass" href="/features/semantic-search">
+    Search repositories before chatting about them
+  </Card>
+</CardGroup>

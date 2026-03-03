@@ -1,0 +1,435 @@
+---
+title: Authentication
+description: Set up GitHub OAuth or Personal Access Token authentication for GitStarRecall
+---
+
+## Overview
+
+GitStarRecall supports two authentication methods:
+
+1. **OAuth (Recommended)** - Secure authorization flow with PKCE
+2. **Personal Access Token (PAT)** - Fallback for power users
+
+<Info>
+  OAuth is recommended for better security. Tokens are held in memory and never persisted to localStorage in raw form.
+</Info>
+
+## OAuth Setup (Recommended)
+
+OAuth uses the PKCE (Proof Key for Code Exchange) flow to keep your GitHub credentials secure. The client secret is only used server-side during token exchange.
+
+### Step 1: Create GitHub OAuth App
+
+<Steps>
+  <Step title="Navigate to GitHub Developer Settings">
+    Go to [GitHub Developer Settings](https://github.com/settings/developers) and click **OAuth Apps** → **New OAuth App**.
+  </Step>
+
+  <Step title="Configure OAuth App">
+    Fill in the application details:
+
+    <CodeGroup>
+    ```text Local Development
+    Application name: GitStarRecall (Dev)
+    Homepage URL: http://localhost:5173
+    Authorization callback URL: http://localhost:5173/auth/callback
+    ```
+
+    ```text Production
+    Application name: GitStarRecall
+    Homepage URL: https://your-domain.com
+    Authorization callback URL: https://your-domain.com/auth/callback
+    ```
+    </CodeGroup>
+
+    <Warning>
+      The callback URL **must** match exactly. Mismatched URLs will cause OAuth exchange failures.
+    </Warning>
+  </Step>
+
+  <Step title="Get Client Credentials">
+    After creating the app, you'll see:
+    - **Client ID** - Public identifier for your OAuth app
+    - **Client Secret** - Click **Generate a new client secret** to create one
+
+    <Note>
+      Save the client secret immediately - you won't be able to see it again.
+    </Note>
+  </Step>
+</Steps>
+
+### Step 2: Configure Environment Variables
+
+Set up both client-side and server-side environment variables:
+
+<CodeGroup>
+```bash .env (Local Development)
+# Client-side OAuth configuration
+VITE_GITHUB_CLIENT_ID=Iv1.a1b2c3d4e5f6g7h8
+VITE_GITHUB_REDIRECT_URI=http://localhost:5173/auth/callback
+VITE_GITHUB_OAUTH_EXCHANGE_URL=/api/github/oauth/exchange
+
+# Server-side OAuth configuration (for token exchange)
+GITHUB_OAUTH_CLIENT_ID=Iv1.a1b2c3d4e5f6g7h8
+GITHUB_OAUTH_CLIENT_SECRET=your_client_secret_here
+GITHUB_OAUTH_REDIRECT_URI=http://localhost:5173/auth/callback
+```
+
+```bash .env (Production)
+# Client-side OAuth configuration
+VITE_GITHUB_CLIENT_ID=Iv1.a1b2c3d4e5f6g7h8
+VITE_GITHUB_REDIRECT_URI=https://your-domain.com/auth/callback
+VITE_GITHUB_OAUTH_EXCHANGE_URL=/api/github/oauth/exchange
+
+# Server-side OAuth configuration (for token exchange)
+GITHUB_OAUTH_CLIENT_ID=Iv1.a1b2c3d4e5f6g7h8
+GITHUB_OAUTH_CLIENT_SECRET=your_client_secret_here
+GITHUB_OAUTH_REDIRECT_URI=https://your-domain.com/auth/callback
+```
+</CodeGroup>
+
+<Note>
+  Both `VITE_GITHUB_REDIRECT_URI` and `GITHUB_OAUTH_REDIRECT_URI` must be identical and match your GitHub OAuth app callback URL.
+</Note>
+
+### Step 3: OAuth Flow Details
+
+The OAuth flow works as follows:
+
+<Steps>
+  <Step title="User Clicks 'Connect GitHub'">
+    The app generates a PKCE code verifier and challenge:
+
+    ```typescript
+    // Generate random verifier and state
+    const verifier = randomString(48);
+    const state = randomString(32);
+    const challenge = base64UrlEncode(await sha256(verifier));
+
+    // Store in sessionStorage for callback verification
+    sessionStorage.setItem('gitstarrecall.oauth.state', state);
+    sessionStorage.setItem('gitstarrecall.oauth.verifier', verifier);
+    ```
+  </Step>
+
+  <Step title="Redirect to GitHub Authorization">
+    User is redirected to GitHub with PKCE parameters:
+
+    ```text
+    https://github.com/login/oauth/authorize?
+      client_id=Iv1.a1b2c3d4e5f6g7h8
+      &redirect_uri=http://localhost:5173/auth/callback
+      &scope=read:user repo
+      &state=random_state_value
+      &code_challenge=challenge_hash
+      &code_challenge_method=S256
+      &allow_signup=false
+    ```
+
+    <Info>
+      Requested scopes:
+      - `read:user` - Read user profile information
+      - `repo` - Access repositories including private starred repos
+    </Info>
+  </Step>
+
+  <Step title="GitHub Redirects Back with Code">
+    After authorization, GitHub redirects to:
+
+    ```text
+    http://localhost:5173/auth/callback?code=abc123&state=random_state_value
+    ```
+  </Step>
+
+  <Step title="Exchange Code for Token">
+    The app sends the code to the backend exchange endpoint:
+
+    ```typescript
+    // Client sends to /api/github/oauth/exchange
+    const response = await fetch('/api/github/oauth/exchange', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        code: 'abc123',
+        codeVerifier: verifier,
+        redirectUri: config.redirectUri,
+        clientId: config.clientId,
+      }),
+    });
+    ```
+
+    Backend exchanges with GitHub using client secret:
+
+    ```javascript
+    // Server-side exchange (api/github/oauth/exchange.js)
+    const ghResponse = await fetch('https://github.com/login/oauth/access_token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        client_id: process.env.GITHUB_OAUTH_CLIENT_ID,
+        client_secret: process.env.GITHUB_OAUTH_CLIENT_SECRET,
+        code,
+        redirect_uri: process.env.GITHUB_OAUTH_REDIRECT_URI,
+        code_verifier: codeVerifier,
+      }),
+    });
+    ```
+  </Step>
+
+  <Step title="Token Stored in Memory">
+    Access token is stored in React state (memory only):
+
+    ```typescript
+    // Token normalization removes common prefixes
+    function normalizeTokenInput(raw: string): string {
+      let token = raw.trim();
+      token = token.replace(/^bearer\s+/i, '');
+      token = token.replace(/^token\s+/i, '');
+      token = token.replace(/^['"]+|['"]+$/g, '').trim();
+      return token;
+    }
+
+    setAccessToken(normalizeTokenInput(token));
+    setAuthMethod('oauth');
+    ```
+
+    <Warning>
+      Tokens are **never** persisted to localStorage or sessionStorage. They exist only in memory and are lost on page refresh.
+    </Warning>
+  </Step>
+</Steps>
+
+### Vercel Deployment
+
+For production deployment on Vercel:
+
+<Steps>
+  <Step title="Set Environment Variables">
+    Add all six environment variables in Vercel project settings:
+
+    ```bash
+    VITE_GITHUB_CLIENT_ID
+    VITE_GITHUB_REDIRECT_URI
+    VITE_GITHUB_OAUTH_EXCHANGE_URL
+    GITHUB_OAUTH_CLIENT_ID
+    GITHUB_OAUTH_CLIENT_SECRET
+    GITHUB_OAUTH_REDIRECT_URI
+    ```
+  </Step>
+
+  <Step title="Verify Routing Configuration">
+    The included `vercel.json` handles SPA routing:
+
+    ```json
+    {
+      "rewrites": [
+        { "source": "/api/(.*)", "destination": "/api/$1" },
+        { "source": "/(.*)", "destination": "/index.html" }
+      ]
+    }
+    ```
+
+    This ensures `/auth/callback` refreshes work correctly.
+  </Step>
+
+  <Step title="Update GitHub OAuth App">
+    Add your production callback URL to the GitHub OAuth app:
+
+    ```text
+    https://your-domain.vercel.app/auth/callback
+    ```
+  </Step>
+</Steps>
+
+## Personal Access Token (PAT) Fallback
+
+For development or self-hosted deployments, you can use a Personal Access Token instead of OAuth.
+
+### Step 1: Create GitHub PAT
+
+<Steps>
+  <Step title="Navigate to Token Settings">
+    Go to [GitHub Personal Access Tokens](https://github.com/settings/tokens) and click **Generate new token** → **Generate new token (classic)**.
+  </Step>
+
+  <Step title="Configure Token Scopes">
+    Select the required scopes:
+
+    - `read:user` - Read user profile
+    - `repo` - Full access to repositories (required for private starred repos)
+
+    <Warning>
+      The `repo` scope is needed to access private repositories you've starred. If you only have public stars, you can use `public_repo` instead.
+    </Warning>
+  </Step>
+
+  <Step title="Copy Token">
+    Copy the generated token immediately - you won't be able to see it again.
+  </Step>
+</Steps>
+
+### Step 2: Use PAT in GitStarRecall
+
+<Steps>
+  <Step title="Navigate to App">
+    Open GitStarRecall and look for the **Use Personal Access Token** option.
+  </Step>
+
+  <Step title="Paste Token">
+    Paste your token in the input field. The app will automatically strip common prefixes:
+
+    ```typescript
+    // These are all equivalent:
+    ghp_1234567890abcdefghijklmnopqrstuvwxyz
+    Bearer ghp_1234567890abcdefghijklmnopqrstuvwxyz
+    token ghp_1234567890abcdefghijklmnopqrstuvwxyz
+    "ghp_1234567890abcdefghijklmnopqrstuvwxyz"
+    ```
+  </Step>
+
+  <Step title="Token Validation">
+    The app validates the token on first API call. If successful, you'll be able to fetch stars.
+  </Step>
+</Steps>
+
+<Warning>
+  PAT authentication stores the token in memory only. On page refresh, you'll need to re-enter the token.
+</Warning>
+
+## Security Considerations
+
+### Token Storage
+
+- **OAuth tokens**: Stored in React state (memory only)
+- **PAT tokens**: Stored in React state (memory only)
+- **No persistence**: Tokens are never written to localStorage, sessionStorage, or IndexedDB
+- **Page refresh**: Requires re-authentication
+
+### OAuth Security Features
+
+<CardGroup cols={2}>
+  <Card title="PKCE Flow" icon="shield-check">
+    Proof Key for Code Exchange prevents authorization code interception attacks
+  </Card>
+  <Card title="State Validation" icon="fingerprint">
+    Random state parameter prevents CSRF attacks
+  </Card>
+  <Card title="Client Secret Isolation" icon="server">
+    Client secret never exposed to browser - only used server-side
+  </Card>
+  <Card title="Scope Minimization" icon="lock">
+    Requests only `read:user` and `repo` scopes - no write access
+  </Card>
+</CardGroup>
+
+### Content Security Policy
+
+The app enforces a strict CSP with explicit allowlist:
+
+```text
+Content-Security-Policy:
+  default-src 'self';
+  connect-src 'self' https://api.github.com https://github.com;
+  script-src 'self' 'wasm-unsafe-eval';
+  worker-src 'self' blob:;
+```
+
+## Logout and Token Cleanup
+
+To clear authentication:
+
+<Steps>
+  <Step title="Click Logout">
+    Click the logout button in the app header or settings.
+  </Step>
+
+  <Step title="Token Cleared">
+    The app clears:
+    - Access token from memory
+    - Authentication method state
+    - LLM provider settings
+  </Step>
+
+  <Step title="Local Data Preserved">
+    Your local star index and chat sessions are **not** deleted on logout. Use **Delete local data** if you want a full reset.
+  </Step>
+</Steps>
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="OAuth exchange failed (400)">
+    **Possible causes:**
+    - Client ID mismatch between `VITE_GITHUB_CLIENT_ID` and `GITHUB_OAUTH_CLIENT_ID`
+    - Redirect URI mismatch between env vars and GitHub OAuth app settings
+    - Client secret incorrect or expired
+
+    **Solution:**
+    - Verify all environment variables match exactly
+    - Check GitHub OAuth app settings
+    - Regenerate client secret if needed
+  </Accordion>
+
+  <Accordion title="OAuth callback 404">
+    **Possible causes:**
+    - Callback URL in GitHub OAuth app doesn't match `VITE_GITHUB_REDIRECT_URI`
+    - Production SPA routing not configured correctly
+
+    **Solution:**
+    - Ensure callback URL ends with `/auth/callback`
+    - Verify `vercel.json` or equivalent SPA fallback is configured
+    - Check that both `VITE_GITHUB_REDIRECT_URI` and `GITHUB_OAUTH_REDIRECT_URI` are identical
+  </Accordion>
+
+  <Accordion title="PAT returns 401 Unauthorized">
+    **Possible causes:**
+    - Token has `Bearer` or `token` prefix (should be raw token only)
+    - Token expired or revoked
+    - Missing required scopes
+
+    **Solution:**
+    - Use raw token: `ghp_...` only
+    - Verify token scopes include `read:user` and `repo`
+    - Regenerate token if expired
+  </Accordion>
+
+  <Accordion title="OAuth state mismatch error">
+    **Possible causes:**
+    - SessionStorage cleared between authorization and callback
+    - Multiple OAuth flows started simultaneously
+    - Browser privacy mode interfering with sessionStorage
+
+    **Solution:**
+    - Don't clear browser data during OAuth flow
+    - Complete one OAuth flow before starting another
+    - Try in normal (non-incognito) browser mode
+  </Accordion>
+
+  <Accordion title="Can't access private starred repos">
+    **Possible causes:**
+    - Missing `repo` scope in OAuth or PAT
+    - Token doesn't have access to organization repositories
+
+    **Solution:**
+    - Ensure `repo` scope is granted (not just `public_repo`)
+    - For organization repos, verify token has organization access
+    - Check GitHub token settings for scope details
+  </Accordion>
+</AccordionGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Core Features" icon="book" href="/features/semantic-search">
+    Learn how to fetch stars, search, and use LLM providers
+  </Card>
+  <Card title="Security Model" icon="shield" href="/configuration/security">
+    Deep dive into threat modeling and security architecture
+  </Card>
+  <Card title="Deployment" icon="cloud" href="/deployment/production">
+    Deploy to Vercel, Netlify, or self-host
+  </Card>
+  <Card title="Troubleshooting" icon="wrench" href="/advanced/troubleshooting">
+    Common issues and solutions
+  </Card>
+</CardGroup>

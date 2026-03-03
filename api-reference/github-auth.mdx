@@ -1,0 +1,325 @@
+---
+title: "GitHub Authentication"
+description: "OAuth and Personal Access Token authentication for GitHub API"
+---
+
+## Overview
+
+GitStarRecall supports two authentication methods for accessing the GitHub API:
+
+- **OAuth Flow**: PKCE-based OAuth 2.0 authorization flow
+- **Personal Access Token (PAT)**: Direct token authentication
+
+## Authentication Methods
+
+### OAuth Configuration
+
+The OAuth configuration is automatically generated based on environment variables.
+
+```typescript
+type OAuthConfig = {
+  clientId: string;
+  redirectUri: string;
+  scopes: string[];
+};
+```
+
+<ParamField path="clientId" type="string" required>
+  GitHub OAuth application client ID. Set via `VITE_GITHUB_CLIENT_ID` environment variable.
+</ParamField>
+
+<ParamField path="redirectUri" type="string" required>
+  OAuth callback URL. Defaults to `${window.location.origin}/auth/callback` or can be set via `VITE_GITHUB_REDIRECT_URI`.
+</ParamField>
+
+<ParamField path="scopes" type="string[]" required>
+  Required GitHub scopes. Always includes `["read:user", "repo"]`.
+</ParamField>
+
+## OAuth Flow
+
+### Starting OAuth Login
+
+Initiate the OAuth authorization flow with GitHub.
+
+```typescript
+import { buildGitHubAuthorizeUrl } from "@/auth/githubOAuth";
+
+// Build authorization URL
+const authorizeUrl = await buildGitHubAuthorizeUrl();
+window.location.assign(authorizeUrl);
+```
+
+This function:
+1. Generates a random state parameter (32 bytes)
+2. Generates a PKCE code verifier (48 bytes)
+3. Creates SHA-256 code challenge from the verifier
+4. Stores state and verifier in `sessionStorage`
+5. Returns the GitHub authorization URL
+
+**Authorization URL Parameters:**
+
+<ParamField path="client_id" type="string" required>
+  GitHub OAuth application client ID
+</ParamField>
+
+<ParamField path="redirect_uri" type="string" required>
+  Callback URL after authorization
+</ParamField>
+
+<ParamField path="scope" type="string" required>
+  Space-separated scopes: `"read:user repo"`
+</ParamField>
+
+<ParamField path="state" type="string" required>
+  Random state for CSRF protection
+</ParamField>
+
+<ParamField path="code_challenge" type="string" required>
+  Base64-URL encoded SHA-256 hash of the code verifier
+</ParamField>
+
+<ParamField path="code_challenge_method" type="string" required>
+  Always `"S256"` for SHA-256 hashing
+</ParamField>
+
+<ParamField path="allow_signup" type="string">
+  Set to `"false"` - requires existing GitHub account
+</ParamField>
+
+### Handling OAuth Callback
+
+Process the OAuth callback from GitHub and exchange the code for an access token.
+
+```typescript
+import { exchangeOAuthCode } from "@/auth/githubOAuth";
+
+type OAuthCallbackInput = {
+  code?: string;
+  state?: string;
+  error?: string;
+};
+
+// Handle the callback
+const accessToken = await exchangeOAuthCode({
+  code: "oauth_code_from_github",
+  state: "state_from_url"
+});
+```
+
+<ParamField path="code" type="string" required>
+  Authorization code from GitHub callback URL
+</ParamField>
+
+<ParamField path="state" type="string" required>
+  State parameter from callback URL (must match stored state)
+</ParamField>
+
+**Returns:**
+
+<ResponseField name="accessToken" type="string">
+  GitHub personal access token for API requests
+</ResponseField>
+
+**Exchange Request Body:**
+
+The function sends a POST request to your OAuth exchange endpoint with:
+
+```typescript
+{
+  code: string;           // Authorization code
+  codeVerifier: string;   // PKCE verifier from session
+  redirectUri: string;    // Must match authorization request
+  clientId: string;       // GitHub OAuth client ID
+}
+```
+
+**Error Handling:**
+
+Throws errors for:
+- Missing OAuth session (state or verifier not found)
+- State mismatch (CSRF protection)
+- Missing exchange URL configuration
+- Failed token exchange (non-200 response)
+- Missing access token in response
+
+### Session Storage Keys
+
+The OAuth flow uses these `sessionStorage` keys:
+
+- `gitstarrecall.oauth.state` - Random state for CSRF protection
+- `gitstarrecall.oauth.verifier` - PKCE code verifier
+
+Both are automatically cleared after successful or failed exchange.
+
+## Personal Access Token (PAT)
+
+### Login with PAT
+
+Authenticate directly with a GitHub Personal Access Token.
+
+```typescript
+import { useAuth } from "@/auth/useAuth";
+
+function LoginComponent() {
+  const { loginWithPat } = useAuth();
+  
+  const handleLogin = (token: string) => {
+    loginWithPat(token);
+  };
+}
+```
+
+The token is automatically normalized by:
+1. Trimming whitespace
+2. Removing `Bearer` prefix (case-insensitive)
+3. Removing `token` prefix (case-insensitive)
+4. Removing surrounding quotes
+
+**Required Scopes:**
+
+Your GitHub PAT must include:
+- `read:user` - Read user profile information
+- `repo` - Access repository data and stars
+
+## Auth Context
+
+### useAuth Hook
+
+Access authentication state and methods from any component.
+
+```typescript
+import { useAuth } from "@/auth/useAuth";
+
+function MyComponent() {
+  const {
+    accessToken,
+    authMethod,
+    oauthConfig,
+    isAuthenticated,
+    beginOAuthLogin,
+    handleOAuthCallback,
+    loginWithPat,
+    logout
+  } = useAuth();
+}
+```
+
+**Context Value:**
+
+<ResponseField name="accessToken" type="string | null">
+  Current GitHub access token, or `null` if not authenticated
+</ResponseField>
+
+<ResponseField name="authMethod" type="'oauth' | 'pat' | null">
+  Authentication method used to obtain the token
+</ResponseField>
+
+<ResponseField name="oauthConfig" type="OAuthConfig">
+  OAuth configuration with `clientId`, `redirectUri`, and `scopes`
+</ResponseField>
+
+<ResponseField name="isAuthenticated" type="boolean">
+  `true` if user has a valid access token
+</ResponseField>
+
+<ResponseField name="beginOAuthLogin" type="() => Promise<void>">
+  Start the OAuth authorization flow (redirects to GitHub)
+</ResponseField>
+
+<ResponseField name="handleOAuthCallback" type="(input: OAuthCallbackInput) => Promise<void>">
+  Process OAuth callback and exchange code for token
+</ResponseField>
+
+<ResponseField name="loginWithPat" type="(token: string) => void">
+  Authenticate with a Personal Access Token
+</ResponseField>
+
+<ResponseField name="logout" type="() => void">
+  Clear authentication state and local settings
+</ResponseField>
+
+## Type Definitions
+
+### AuthMethod
+
+```typescript
+type AuthMethod = "oauth" | "pat";
+```
+
+### OAuthCallbackInput
+
+```typescript
+type OAuthCallbackInput = {
+  code?: string;   // Authorization code from GitHub
+  state?: string;  // State parameter for CSRF protection
+  error?: string;  // Error message if authorization failed
+};
+```
+
+### OAuthConfig
+
+```typescript
+type OAuthConfig = {
+  clientId: string;      // GitHub OAuth app client ID
+  redirectUri: string;   // OAuth callback URL
+  scopes: string[];      // Required permissions
+};
+```
+
+## Security Features
+
+### PKCE (Proof Key for Code Exchange)
+
+The OAuth flow implements PKCE to prevent authorization code interception:
+
+1. Generate random `code_verifier` (48 bytes, base64-url encoded)
+2. Create `code_challenge` = BASE64URL(SHA256(code_verifier))
+3. Send `code_challenge` with authorization request
+4. Send `code_verifier` with token exchange request
+5. GitHub validates that SHA256(verifier) matches the challenge
+
+### CSRF Protection
+
+Random state parameter prevents cross-site request forgery:
+
+1. Generate random state (32 bytes)
+2. Store in `sessionStorage` before redirect
+3. GitHub includes state in callback URL
+4. Verify callback state matches stored value
+
+### Token Normalization
+
+All tokens are normalized to prevent common input errors:
+- Strips whitespace
+- Removes authentication scheme prefixes
+- Removes quotes
+- Validates non-empty result
+
+## Error Messages
+
+| Error | Cause |
+|-------|-------|
+| `Missing VITE_GITHUB_CLIENT_ID` | OAuth client ID not configured |
+| `Missing VITE_GITHUB_OAUTH_EXCHANGE_URL` | Exchange endpoint not configured |
+| `OAuth session was not found` | State/verifier missing from sessionStorage |
+| `OAuth state mismatch` | Callback state doesn't match stored state |
+| `OAuth token exchange failed (status)` | HTTP error from exchange endpoint |
+| `OAuth exchange did not return access_token` | Invalid response format |
+| `GitHub returned an OAuth error: {error}` | GitHub rejected authorization |
+| `Missing OAuth code/state in callback URL` | Invalid callback parameters |
+| `GitHub token is required` | Empty or invalid PAT provided |
+
+## Environment Variables
+
+<ParamField path="VITE_GITHUB_CLIENT_ID" type="string" required>
+  GitHub OAuth application client ID
+</ParamField>
+
+<ParamField path="VITE_GITHUB_REDIRECT_URI" type="string">
+  OAuth callback URL. Defaults to `${origin}/auth/callback`
+</ParamField>
+
+<ParamField path="VITE_GITHUB_OAUTH_EXCHANGE_URL" type="string" required>
+  Backend endpoint for exchanging authorization code for access token
+</ParamField>

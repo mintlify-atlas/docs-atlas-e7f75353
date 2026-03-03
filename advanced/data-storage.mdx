@@ -1,0 +1,595 @@
+---
+title: Data Storage
+description: SQLite WASM, OPFS, IndexedDB backup, and chat storage implementation details
+---
+
+## Overview
+
+GitStarRecall uses a multi-layered storage strategy designed for privacy, performance, and browser compatibility. All data is stored client-side by default.
+
+## Storage Layers
+
+### Primary Storage: SQLite WASM
+
+The main database uses `sql.js`, a SQLite WASM implementation that runs entirely in the browser.
+
+**Key Features:**
+- Full SQL database in browser memory
+- ACID transactions
+- Foreign key constraints
+- Efficient indexing
+- Export/import capability
+
+**Implementation:**
+```typescript
+import initSqlJs from "sql.js";
+import wasmUrl from "sql.js/dist/sql-wasm.wasm?url";
+
+const SQL = await initSqlJs({
+  locateFile: () => wasmUrl,
+});
+```
+
+### Persistence Layer: OPFS
+
+**Origin Private File System (OPFS)** provides fast, private file storage when available.
+
+**Benefits:**
+- Persistent across sessions
+- Better performance than localStorage
+- Larger storage quota
+- Private to origin
+
+**Availability Check:**
+```typescript
+function isOpfsSupported(): boolean {
+  return typeof navigator !== "undefined" && 
+         Boolean(navigator.storage?.getDirectory);
+}
+```
+
+**File Operations:**
+- Database file: `gitstarrecall.sqlite`
+- Written on checkpoint (periodic + on completion)
+- Read on app initialization
+- Atomic write with `createWritable()`
+
+### Fallback: localStorage
+
+When OPFS is unavailable, the database is persisted to localStorage as Base64-encoded bytes.
+
+**Key:** `gitstarrecall.sqlite.base64`
+
+**Limitations:**
+- ~5-10MB quota (browser-dependent)
+- Slower than OPFS
+- Can fail on quota exceeded
+
+**Encoding:**
+```typescript
+function toBase64(bytes: Uint8Array): string {
+  let binary = "";
+  for (let i = 0; i < bytes.length; i++) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  return btoa(binary);
+}
+```
+
+### Fallback: Memory-Only Mode
+
+When both OPFS and localStorage fail (quota exceeded), the database runs in memory only.
+
+**Behavior:**
+- Data persists within tab session
+- Lost on tab close/refresh
+- No write errors
+- Storage mode indicated in UI
+
+### Storage Mode Priority
+
+1. **OPFS** (preferred)
+2. **localStorage** (fallback)
+3. **memory** (last resort)
+
+The app automatically degrades gracefully based on browser capabilities and quota.
+
+## Database Schema
+
+### Tables
+
+#### repos
+
+Stores GitHub repository metadata and README content.
+
+```sql
+CREATE TABLE IF NOT EXISTS repos (
+  id INTEGER PRIMARY KEY,
+  full_name TEXT NOT NULL,
+  name TEXT NOT NULL,
+  description TEXT,
+  topics_json TEXT NOT NULL DEFAULT '[]',
+  language TEXT,
+  html_url TEXT NOT NULL,
+  stars INTEGER NOT NULL DEFAULT 0,
+  forks INTEGER NOT NULL DEFAULT 0,
+  updated_at TEXT NOT NULL,
+  readme_url TEXT,
+  readme_text TEXT,
+  readme_etag TEXT,
+  readme_last_modified TEXT,
+  checksum TEXT,
+  last_synced_at INTEGER NOT NULL
+);
+```
+
+**Key Fields:**
+- `id`: GitHub repository ID
+- `checksum`: SHA-256 hash of metadata + README for diff-based sync
+- `readme_etag`: HTTP ETag for conditional README fetch
+- `readme_last_modified`: HTTP Last-Modified header
+- `topics_json`: JSON array of repository topics
+
+#### chunks
+
+Stores text chunks generated from README content.
+
+```sql
+CREATE TABLE IF NOT EXISTS chunks (
+  id TEXT PRIMARY KEY,
+  repo_id INTEGER NOT NULL,
+  chunk_id TEXT NOT NULL,
+  text TEXT NOT NULL,
+  source TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  FOREIGN KEY (repo_id) REFERENCES repos(id) ON DELETE CASCADE
+);
+
+CREATE INDEX idx_chunks_repo_id ON chunks(repo_id);
+CREATE INDEX idx_chunks_created_at ON chunks(created_at);
+```
+
+**Chunking Strategy:**
+- Simple tokenizer with overlap
+- Target: 500-800 characters per chunk
+- Overlap: 80-120 characters
+- Source: `readme` or `metadata`
+
+#### embeddings
+
+Stores vector embeddings for semantic search.
+
+```sql
+CREATE TABLE IF NOT EXISTS embeddings (
+  id TEXT PRIMARY KEY,
+  chunk_id TEXT NOT NULL,
+  model TEXT NOT NULL,
+  dimension INTEGER NOT NULL,
+  vector_blob BLOB NOT NULL,
+  created_at INTEGER NOT NULL,
+  FOREIGN KEY (chunk_id) REFERENCES chunks(id) ON DELETE CASCADE
+);
+
+CREATE INDEX idx_embeddings_chunk_id ON embeddings(chunk_id);
+```
+
+**Vector Storage:**
+- Format: Float32Array stored as BLOB
+- Dimension: 384 (for `all-MiniLM-L6-v2`)
+- Model: Tracked for compatibility checks
+- Normalization: L2-normalized before storage
+
+**Conversion:**
+```typescript
+// Float32Array to Uint8Array for BLOB storage
+const vectorBlob = new Uint8Array(
+  vector.buffer, 
+  vector.byteOffset, 
+  vector.byteLength
+);
+
+// Uint8Array back to Float32Array for search
+const vector = new Float32Array(
+  blob.buffer, 
+  blob.byteOffset, 
+  blob.byteLength / 4
+);
+```
+
+#### chat_sessions
+
+Stores chat session metadata.
+
+```sql
+CREATE TABLE IF NOT EXISTS chat_sessions (
+  id TEXT NOT NULL PRIMARY KEY,
+  query TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+```
+
+**Session Management:**
+- One session per initial query
+- Can have multiple follow-up messages
+- Sorted by `updated_at` DESC in UI
+- Updated on new message
+
+#### chat_messages
+
+Stores individual chat messages.
+
+```sql
+CREATE TABLE IF NOT EXISTS chat_messages (
+  id TEXT NOT NULL PRIMARY KEY,
+  session_id TEXT NOT NULL,
+  role TEXT NOT NULL CHECK (role IN ('user','assistant','system')),
+  content TEXT NOT NULL,
+  sequence INTEGER NOT NULL,
+  created_at INTEGER NOT NULL,
+  FOREIGN KEY (session_id) REFERENCES chat_sessions(id) ON DELETE CASCADE
+);
+
+CREATE INDEX idx_chat_messages_session ON chat_messages(session_id);
+CREATE INDEX idx_chat_messages_order ON chat_messages(session_id, created_at, sequence);
+```
+
+**Message Ordering:**
+- Primary: `created_at` ASC
+- Secondary: `sequence` ASC (for same timestamp)
+- Role: `user`, `assistant`, or `system`
+
+#### index_meta
+
+Stores indexing metadata and resume state.
+
+```sql
+CREATE TABLE IF NOT EXISTS index_meta (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+```
+
+**Key Metadata:**
+- `embedding_backend`: `webgpu` or `wasm`
+- `embedding_pool_size`: Number of workers used
+- `checkpoint_policy_version`: Tracking policy changes
+- `last_checkpoint_at`: Timestamp of last checkpoint
+- `embedding_perf_last_run`: JSON performance summary
+- `large_library_cursor`: Resume position for interrupted indexing
+
+## Chat Backup System
+
+Chat sessions and messages are additionally backed up to IndexedDB (with localStorage fallback) to provide extra durability.
+
+### IndexedDB Structure
+
+**Database:** `gitstarrecall-chat-backup` (version 1)
+
+**Object Stores:**
+1. `chat_sessions`
+   - keyPath: `id`
+   - Stores: `ChatSessionRecord[]`
+
+2. `chat_messages`
+   - keyPath: `id`
+   - Index: `by_session_id` on `sessionId` (non-unique)
+   - Stores: `ChatMessageRecord[]`
+
+### Backup Strategy
+
+**On Session Write:**
+```typescript
+await backupChatSession(session);
+```
+
+**On Message Write:**
+```typescript
+await backupChatMessage(message);
+```
+
+**Backup Priority:**
+1. Try IndexedDB
+2. Fall back to localStorage
+3. Silent failure (chat still in SQLite)
+
+### Backup Limits
+
+- **Sessions**: Max 200 (keep most recent)
+- **Messages**: Max 5000 (keep most recent by `created_at`)
+- **Auto-pruning**: After each backup write
+
+### localStorage Backup Keys
+
+- Sessions: `gitstarrecall.chat.backup.sessions.v1`
+- Messages: `gitstarrecall.chat.backup.messages.v1`
+
+### Recovery Flow
+
+1. On app load, check IndexedDB for backup
+2. If IndexedDB has data, use it
+3. Otherwise, check localStorage
+4. Merge backup into SQLite if SQLite is empty or corrupt
+
+## Checkpointing Strategy
+
+Embedding writes are batched and checkpointed periodically to balance performance and durability.
+
+### Policy
+
+**Checkpoint Triggers:**
+- Every 256 embeddings (configurable)
+- Every 3000ms (configurable)
+- On completion of indexing run
+- On manual flush
+
+**Environment Variables:**
+```bash
+VITE_DB_CHECKPOINT_EVERY_EMBEDDINGS=256
+VITE_DB_CHECKPOINT_EVERY_MS=3000
+```
+
+### Implementation
+
+```typescript
+class LocalDatabase {
+  private pendingEmbeddingsSinceCheckpoint = 0;
+  private lastEmbeddingCheckpointAt: number | null = null;
+
+  private shouldCheckpointEmbeddings(now: number): boolean {
+    if (this.pendingEmbeddingsSinceCheckpoint >= policy.everyEmbeddings) {
+      return true;
+    }
+    const elapsed = now - (this.lastEmbeddingCheckpointAt ?? now);
+    return elapsed >= policy.everyMs;
+  }
+
+  async upsertEmbeddings(embeddings: EmbeddingRecord[]): Promise<void> {
+    // Write to DB
+    this.runEmbeddingUpsert(embeddings);
+    
+    // Track pending
+    this.noteEmbeddingWrites(embeddings.length);
+    
+    // Checkpoint if needed
+    if (this.shouldCheckpointEmbeddings(Date.now())) {
+      await this.flushPendingEmbeddingCheckpoint();
+    }
+  }
+}
+```
+
+### Benefits
+
+- **Performance**: Fewer disk writes
+- **Durability**: Regular checkpoints limit data loss
+- **Tunability**: Configurable based on device capabilities
+
+## Vector Search Implementation
+
+GitStarRecall uses brute-force cosine similarity search with an in-memory cache.
+
+### Vector Index Cache
+
+```typescript
+private vectorIndexCache: Array<{ 
+  chunkId: string; 
+  vector: Float32Array 
+}> | null = null;
+private vectorIndexCacheCount = -1;
+```
+
+**Cache Invalidation:**
+- On new embeddings written
+- On chunks deleted
+- When embedding count changes
+
+**Cache Rebuild:**
+```typescript
+const result = db.exec(`
+  SELECT e.chunk_id, e.vector_blob
+  FROM embeddings e
+  INNER JOIN chunks c ON c.id = e.chunk_id;
+`);
+
+this.vectorIndexCache = result[0].values.map((row) => ({
+  chunkId: String(row[0]),
+  vector: new Float32Array(
+    blob.buffer, 
+    blob.byteOffset, 
+    blob.byteLength / 4
+  )
+}));
+```
+
+### Similarity Search
+
+```typescript
+async findSimilarChunks(
+  queryVector: Float32Array, 
+  limit: number
+): Promise<SearchResult[]> {
+  // 1. Ensure cache is current
+  const vectors = this.ensureVectorIndexCache();
+  
+  // 2. Compute similarity for all vectors
+  const scores = vectors.map(({ chunkId, vector }) => ({
+    chunkId,
+    score: cosineSimilarity(queryVector, vector)
+  }));
+  
+  // 3. Sort and slice top-K
+  scores.sort((a, b) => b.score - a.score);
+  const topChunks = scores.slice(0, limit);
+  
+  // 4. Hydrate with text and repo metadata
+  // (SQL join for details)
+  
+  return results;
+}
+```
+
+### Cosine Similarity
+
+```typescript
+function cosineSimilarity(a: Float32Array, b: Float32Array): number {
+  let dot = 0, normA = 0, normB = 0;
+  
+  for (let i = 0; i < a.length; i++) {
+    dot += a[i] * b[i];
+    normA += a[i] * a[i];
+    normB += b[i] * b[i];
+  }
+  
+  return dot / (Math.sqrt(normA) * Math.sqrt(normB));
+}
+```
+
+**Normalization:**
+- All embeddings are L2-normalized before storage
+- Query vectors are L2-normalized before search
+- This ensures cosine similarity works correctly
+
+## Sync and Diff Strategy
+
+### Checksum Generation
+
+```typescript
+import { createHash } from "crypto";
+
+function computeRepoChecksum(repo: RepoMetadata): string {
+  const canonical = JSON.stringify({
+    id: repo.id,
+    fullName: repo.fullName,
+    description: repo.description ?? "",
+    topics: repo.topics.sort(),
+    language: repo.language ?? "",
+    updatedAt: repo.updatedAt,
+    readmeText: repo.readmeText ?? ""
+  });
+  
+  return createHash("sha256")
+    .update(canonical, "utf-8")
+    .digest("hex");
+}
+```
+
+### Diff-Based Sync
+
+**On Fetch Stars:**
+
+1. Get current repo sync state from DB
+2. Fetch latest stars from GitHub
+3. Compute checksums for fetched repos
+4. Compare:
+   - **New**: Not in local DB
+   - **Changed**: Checksum differs
+   - **Unchanged**: Checksum matches
+   - **Removed**: In local DB but not in fetched stars
+5. Update/insert changed and new repos
+6. Delete removed repos (cascades to chunks and embeddings)
+7. Generate chunks only for new/changed repos
+8. Queue chunks for embedding
+
+### README Caching
+
+**ETag and Last-Modified Headers:**
+
+```typescript
+const headers: Record<string, string> = {};
+if (repo.readmeEtag) {
+  headers["If-None-Match"] = repo.readmeEtag;
+}
+if (repo.readmeLastModified) {
+  headers["If-Modified-Since"] = repo.readmeLastModified;
+}
+
+const response = await fetch(readmeUrl, { headers });
+
+if (response.status === 304) {
+  // Not modified, skip README update
+  return;
+}
+
+// Update README and store new ETag/Last-Modified
+repo.readmeEtag = response.headers.get("ETag");
+repo.readmeLastModified = response.headers.get("Last-Modified");
+```
+
+**Benefits:**
+- Reduces GitHub API calls
+- Faster sync for unchanged READMEs
+- Respects rate limits
+
+## Data Cleanup
+
+### Clear All Data
+
+```typescript
+// Clear SQLite
+await clearOpfsFile();
+clearLocalStorageBytes();
+
+// Clear chat backup
+await clearChatBackup();
+
+// Reinitialize database
+const db = await initializeDatabase();
+```
+
+**User Triggers:**
+- "Delete local data" button in settings
+- Clears all repos, chunks, embeddings, and chat data
+- Does not clear GitHub token
+
+### Clear Token
+
+```typescript
+// Clear from memory
+setToken(null);
+
+// Clear from encrypted storage (if enabled)
+await clearEncryptedToken();
+```
+
+**User Triggers:**
+- "Clear token" button in settings
+- Logs user out
+- Does not clear local data
+
+## Storage Diagnostics
+
+### Storage Mode Detection
+
+```typescript
+const db = await getDatabase();
+const mode = db.storageMode; // "opfs" | "local-storage" | "memory"
+```
+
+**Displayed in UI:**
+- Settings page shows current storage mode
+- Warning if in memory-only mode
+
+### Quota Estimation
+
+```typescript
+if (navigator.storage?.estimate) {
+  const estimate = await navigator.storage.estimate();
+  const usedMB = (estimate.usage ?? 0) / (1024 * 1024);
+  const quotaMB = (estimate.quota ?? 0) / (1024 * 1024);
+  const percentUsed = (usedMB / quotaMB) * 100;
+}
+```
+
+### Database Size
+
+```typescript
+const bytes = db.export();
+const sizeMB = bytes.byteLength / (1024 * 1024);
+```
+
+## Related Documentation
+
+- [Architecture](/advanced/architecture) - System architecture and tech stack
+- [Troubleshooting](/advanced/troubleshooting) - Common storage issues
