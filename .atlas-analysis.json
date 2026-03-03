@@ -1,0 +1,109 @@
+{
+  "projectType": "saas",
+  "projectName": "GitStarRecall",
+  "projectDescription": "Local-first AI-powered web app that transforms your GitHub stars into a searchable semantic memory system with privacy-focused RAG and optional WebLLM/Ollama support.",
+  "theme": "palm",
+  "primaryColor": "#0ea5e9",
+  "lightColor": "#38bdf8",
+  "darkColor": "#0284c7",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "quickstart",
+              "authentication"
+            ]
+          },
+          {
+            "group": "Core Features",
+            "pages": [
+              "features/semantic-search",
+              "features/chat-sessions",
+              "features/embeddings",
+              "features/local-llm"
+            ]
+          },
+          {
+            "group": "Configuration",
+            "pages": [
+              "configuration/environment-variables",
+              "configuration/performance-tuning",
+              "configuration/security"
+            ]
+          },
+          {
+            "group": "Deployment",
+            "pages": [
+              "deployment/local-development",
+              "deployment/production"
+            ]
+          },
+          {
+            "group": "Advanced",
+            "pages": [
+              "advanced/architecture",
+              "advanced/data-storage",
+              "advanced/troubleshooting"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "Core Modules",
+            "pages": [
+              "api-reference/database",
+              "api-reference/embeddings",
+              "api-reference/search",
+              "api-reference/chunking"
+            ]
+          },
+          {
+            "group": "LLM Providers",
+            "pages": [
+              "api-reference/webllm",
+              "api-reference/ollama",
+              "api-reference/remote-providers"
+            ]
+          },
+          {
+            "group": "GitHub Integration",
+            "pages": [
+              "api-reference/github-auth",
+              "api-reference/github-sync"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Local-first semantic search with browser-based embeddings",
+    "Privacy-focused RAG with GitHub stars",
+    "Multi-provider LLM support (WebLLM, Ollama, Remote)",
+    "OAuth and PAT authentication",
+    "Persistent chat sessions with SQLite",
+    "WebGPU-accelerated embeddings with WASM fallback",
+    "Adaptive batching for large star collections",
+    "Checkpointed indexing with resume support"
+  ],
+  "publicApiSurface": [
+    "Database Client (SQLite WASM + OPFS)",
+    "Embedding Pipeline (Xenova Transformers)",
+    "Search & Retrieval (Vector Similarity)",
+    "Chat Session Management",
+    "GitHub OAuth & Star Sync",
+    "WebLLM Provider",
+    "Ollama Provider",
+    "Remote LLM Provider Adapter",
+    "Chunking Engine",
+    "Worker Pool Manager"
+  ]
+}
