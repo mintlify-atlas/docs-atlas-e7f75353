@@ -35,6 +35,14 @@ Configure GitHub authentication for accessing starred repositories.
   **Example:** `http://localhost:5173/auth/callback`
 </ParamField>
 
+<ParamField path="GITHUB_OAUTH_REDIRECT_URI" type="string" required>
+  Server-side OAuth callback URL for token exchange verification.
+  
+  Must match `VITE_GITHUB_REDIRECT_URI` exactly. Used by the backend to verify OAuth requests.
+  
+  **Example:** `http://localhost:5173/auth/callback`
+</ParamField>
+
 <ParamField path="VITE_GITHUB_OAUTH_EXCHANGE_URL" type="string" default="/api/github/oauth/exchange">
   Backend endpoint that exchanges OAuth code + PKCE verifier for access token.
   

@@ -314,3 +314,138 @@ type EmbeddingRuntimeInfo = {
   fallbackReason: string | null;
 };
 ```
+## EmbeddingWorkerPool
+
+The `EmbeddingWorkerPool` class manages a pool of embedding workers for parallel batch processing with automatic concurrency control and error handling.
+
+### Constructor
+
+```typescript
+import { EmbeddingWorkerPool } from "./embeddings/WorkerPool";
+
+const pool = new EmbeddingWorkerPool({
+  poolSize: 2,
+  maxPoolSize: 2,
+  maxQueueSize: 1024,
+  downshiftErrorThreshold: 3,
+  workerBatchSize: 8,
+  preferredBackend: "webgpu"
+});
+```
+
+<ParamField path="poolSize" type="number" default={2}>
+  Initial number of workers in the pool (1-2)
+</ParamField>
+
+<ParamField path="maxPoolSize" type="number" default={2}>
+  Maximum allowed workers (hard limit)
+</ParamField>
+
+<ParamField path="maxQueueSize" type="number" default={1024}>
+  Maximum batch size before rejecting requests
+</ParamField>
+
+<ParamField path="downshiftErrorThreshold" type="number" default={3}>
+  Number of errors before reducing pool to 1 worker
+</ParamField>
+
+<ParamField path="workerBatchSize" type="number" default={8}>
+  Texts per worker batch (1-32)
+</ParamField>
+
+<ParamField path="preferredBackend" type="EmbeddingBackendPreference" default="webgpu">
+  Backend preference ("webgpu" or "wasm")
+</ParamField>
+
+### embedBatch()
+
+Process multiple texts in parallel across worker pool.
+
+```typescript
+const texts = ["repo description 1", "repo description 2", ...];
+const results = await pool.embedBatch(texts);
+
+for (const { embedding, error } of results) {
+  if (error) {
+    console.error("Embedding failed:", error);
+  } else {
+    console.log("Vector dimensions:", embedding.length); // 384
+  }
+}
+```
+
+<ParamField path="texts" type="string[]" required>
+  Array of text strings to embed
+</ParamField>
+
+<ResponseField name="Returns" type="Promise<BatchEmbeddingResultItem[]>">
+  Array of embedding results (same length as input)
+</ResponseField>
+
+### getStatus()
+
+Get current pool status including backend selection and downshift state.
+
+```typescript
+const status = pool.getStatus();
+console.log(`Active workers: ${status.activePoolSize}/${status.configuredPoolSize}`);
+console.log(`Backend: ${status.selectedBackend}`);
+if (status.downshifted) {
+  console.log(`Downshift reason: ${status.downshiftReason}`);
+}
+```
+
+<ResponseField name="configuredPoolSize" type="number">
+  Configured number of workers
+</ResponseField>
+
+<ResponseField name="activePoolSize" type="number">
+  Currently active workers (may be less if downshifted)
+</ResponseField>
+
+<ResponseField name="downshifted" type="boolean">
+  Whether pool has reduced to single worker due to errors
+</ResponseField>
+
+<ResponseField name="downshiftReason" type="string | null">
+  Reason for downshift (e.g., "out of memory", error threshold exceeded)
+</ResponseField>
+
+<ResponseField name="errorCount" type="number">
+  Total embedding errors encountered
+</ResponseField>
+
+<ResponseField name="selectedBackend" type="EmbeddingBackendPreference | null">
+  Actually selected backend (may differ from preferred)
+</ResponseField>
+
+<ResponseField name="backendFallbackReason" type="string | null">
+  Reason for backend fallback if applicable
+</ResponseField>
+
+### setConcurrency()
+
+Manually adjust pool size within configured limits.
+
+```typescript
+pool.setConcurrency(1); // Reduce to single worker
+```
+
+<ParamField path="targetPoolSize" type="number" required>
+  Desired pool size (clamped to maxPoolSize and configuredPoolSize)
+</ParamField>
+
+### terminate()
+
+Terminate all workers and release resources.
+
+```typescript
+pool.terminate();
+```
+
+## Worker Pool Behavior
+
+- **Automatic downshifting**: Pool reduces to 1 worker after 3 errors or on memory pressure
+- **WebGPU concurrency**: Automatically uses 1 worker when WebGPU backend is selected
+- **WASM concurrency**: Can use up to configured pool size with WASM backend
+- **Error resilience**: Individual embedding failures don't crash the entire batch
